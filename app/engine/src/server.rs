@@ -1536,17 +1536,21 @@ fn spawn_watcher(s: &Shared, id: String, dir: PathBuf, sources: Vec<String>) {
 struct LiveQuery {
     #[serde(default)]
     from: usize,
+    /// 界面手里的说话人版本；过时了就从头给（录音中会整场重新聚类说话人）
+    #[serde(default)]
+    rev: u64,
 }
 
 /// 录音中的全部实时转写，从第 `from` 句起（界面每次只取新增的），带上标记过的重点时刻
 async fn live_lines(State(s): State<Shared>, Query(q): Query<LiveQuery>) -> ApiResult<Json<Value>> {
     let rec = s.recording.lock().unwrap();
     let live = rec.as_ref().ok_or_else(|| ApiError(StatusCode::NOT_FOUND, tr("没有正在进行的录音", "Nothing is being recorded").into()))?;
-    let (lines, total) = live.live.as_ref().map(|l| l.lines_from(q.from)).unwrap_or_default();
+    let (lines, total, rev) = live.live.as_ref().map(|l| l.lines_from(q.from, q.rev)).unwrap_or_default();
     Ok(Json(json!({
         "job": live.job,
-        "from": q.from.min(total),
+        "from": total - lines.len(),
         "total": total,
+        "rev": rev,
         "lines": lines.into_iter().map(|l| json!({"start_ms": l.start_ms, "speaker": l.speaker, "text": l.text})).collect::<Vec<_>>(),
         "marks": live.marks,
     })))

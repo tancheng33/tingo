@@ -20,8 +20,11 @@ const LOOKAHEAD_S: f64 = 0.2; // 文件末尾先不处理，留给"提前关麦�
 const LIVE_STEP_S: f64 = 0.25; // 边录边转：攒够这么多新音频就混一次、看看能不能切
 const LIVE_POLL: Duration = Duration::from_millis(250);
 /// 录音中给说话人临时编号：和已有说话人的声纹余弦相似度够高就归进去，否则算新的一位。
-/// 结束后仍用 [`cluster`] 整场重新聚类，以那次为准。
+/// 一句话很短、声纹不稳，光靠这个会越分越多（实测 15 分钟 3 人的会编出 66 位），所以每出新句子就用 [`cluster`]
+/// 整场重新聚类一次（见 [`LIVE_RECLUSTER`]），临时编号通常不到一秒就被改正。
 const LIVE_SAME_SPEAKER: f32 = 0.7;
+/// 录音中整场重新聚类说话人的最短间隔；聚类耗时（15 分钟的会约 0.13 秒）长了就按耗时的 5 倍拉开，不拖慢出字
+const LIVE_RECLUSTER: Duration = Duration::from_secs(1);
 
 #[derive(Default)]
 pub struct Timings {
@@ -106,50 +109,10 @@ impl Chunker {
         ((self.pending_start + self.pending.len() as f64 / SR as f64) * 1000.0).round() as u64
     }
 
-    /// 全部声纹统一聚类，得到说话人编号全场一致的转写。每段的说话人取段内小窗的多数。
+    /// 全部声纹统一聚类，得到说话人编号全场一致的转写。
     pub fn assemble(&mut self, source: &Path) -> Transcript {
         let t = Instant::now();
-        let mut owner = Vec::new(); // 每个小窗属于哪一段
-        let mut emb = Vec::new();
-        for (i, seg) in self.segments.iter().enumerate() {
-            for e in &seg.embeddings {
-                owner.push(i);
-                emb.push(e.clone());
-            }
-        }
-        let labels = cluster(&emb);
-        let mut votes: Vec<std::collections::BTreeMap<usize, usize>> =
-            vec![Default::default(); self.segments.len()];
-        for (&i, &l) in owner.iter().zip(&labels) {
-            *votes[i].entry(l).or_default() += 1;
-        }
-        let mut speaker: Vec<Option<usize>> = votes
-            .iter()
-            .map(|v| {
-                v.iter()
-                    .max_by_key(|(l, n)| (**n, std::cmp::Reverse(**l)))
-                    .map(|(l, _)| *l)
-            })
-            .collect();
-        // 太短提不出声纹的段：归给前一段（开头就没有的归给后一段）
-        let mut last = None;
-        for s in speaker.iter_mut() {
-            if s.is_none() {
-                *s = last;
-            }
-            last = *s;
-        }
-        // 按首次出现的先后重新编号（第一个开口的是说话人1），和 FunASR 一致
-        let mut order: Vec<usize> = Vec::new();
-        for s in speaker.iter().flatten() {
-            if !order.contains(s) {
-                order.push(*s);
-            }
-        }
-        let speaker: Vec<Option<usize>> = speaker
-            .iter()
-            .map(|s| s.map(|l| order.iter().position(|&o| o == l).unwrap()))
-            .collect();
+        let speaker = segment_speakers(&self.segments);
         let first = speaker.iter().flatten().next().copied().unwrap_or(0);
         self.timings.cluster_s = t.elapsed().as_secs_f64();
         self.timings.segments = self.segments.len();
@@ -170,6 +133,43 @@ impl Chunker {
                 .collect(),
         }
     }
+}
+
+/// 全部声纹统一聚类，给每段编说话人：每段取段内小窗的多数，按首次开口的先后编号（第一个开口的是 0）。
+/// 太短提不出声纹的段归给前一段；开头就没有的是 None。
+fn segment_speakers(segments: &[Segment]) -> Vec<Option<usize>> {
+    let mut owner = Vec::new(); // 每个小窗属于哪一段
+    let mut emb = Vec::new();
+    for (i, seg) in segments.iter().enumerate() {
+        for e in &seg.embeddings {
+            owner.push(i);
+            emb.push(e.clone());
+        }
+    }
+    let labels = cluster(&emb);
+    let mut votes: Vec<std::collections::BTreeMap<usize, usize>> = vec![Default::default(); segments.len()];
+    for (&i, &l) in owner.iter().zip(&labels) {
+        *votes[i].entry(l).or_default() += 1;
+    }
+    let mut speaker: Vec<Option<usize>> = votes
+        .iter()
+        .map(|v| v.iter().max_by_key(|(l, n)| (**n, std::cmp::Reverse(**l))).map(|(l, _)| *l))
+        .collect();
+    let mut last = None;
+    for s in speaker.iter_mut() {
+        if s.is_none() {
+            *s = last;
+        }
+        last = *s;
+    }
+    // 按首次出现的先后重新编号（第一个开口的是说话人1），和 FunASR 一致
+    let mut order: Vec<usize> = Vec::new();
+    for s in speaker.iter().flatten() {
+        if !order.contains(s) {
+            order.push(*s);
+        }
+    }
+    speaker.iter().map(|s| s.map(|l| order.iter().position(|&o| o == l).unwrap())).collect()
 }
 
 /// 分段转写一段完整音频（16 kHz 单声道）。
@@ -208,6 +208,12 @@ struct LiveState {
     speech_ends: Vec<usize>,
     lines: Vec<LiveLine>,
     speakers: LiveSpeakers,
+    /// 整场重新聚类改过前面句子的说话人就加一，界面据此整场重取
+    speaker_rev: u64,
+    /// 上次整场聚类：当时有几段、什么时候、花了多久
+    clustered: usize,
+    clustered_at: Option<Instant>,
+    cluster_cost: Duration,
     /// 每句从说完到识别出来用了几秒
     lags: Vec<f64>,
     error: Option<String>,
@@ -222,44 +228,58 @@ pub struct LiveLine {
     pub text: String,
 }
 
-/// 录音中逐句给说话人编号：每位说话人记一个平均声纹
+/// 录音中逐句给说话人编号：每位说话人记下声纹（单位向量）之和，方向就是平均声纹
 #[derive(Default)]
 struct LiveSpeakers {
-    centroids: Vec<(Vec<f32>, usize)>,
+    centroids: Vec<Vec<f32>>,
 }
 
 impl LiveSpeakers {
     fn assign(&mut self, embeddings: &[Vec<f32>]) -> Option<usize> {
-        let dim = embeddings.first()?.len();
-        let mut mean = vec![0.0f32; dim];
-        for e in embeddings {
-            let n = norm(e);
-            for (m, v) in mean.iter_mut().zip(e) {
-                *m += v / n;
-            }
-        }
+        let sum = unit_sum(embeddings.iter())?;
         let best = self
             .centroids
             .iter()
             .enumerate()
-            .map(|(i, (c, _))| (i, cosine(c, &mean)))
+            .map(|(i, c)| (i, cosine(c, &sum)))
             .max_by(|a, b| a.1.total_cmp(&b.1));
         match best {
             Some((i, sim)) if sim >= LIVE_SAME_SPEAKER => {
-                let (c, n) = &mut self.centroids[i];
-                let k = embeddings.len();
-                for (cv, mv) in c.iter_mut().zip(&mean) {
-                    *cv = (*cv * *n as f32 + mv) / (*n + k) as f32;
+                for (c, v) in self.centroids[i].iter_mut().zip(&sum) {
+                    *c += v;
                 }
-                *n += k;
                 Some(i)
             }
             _ => {
-                self.centroids.push((mean, embeddings.len()));
+                self.centroids.push(sum);
                 Some(self.centroids.len() - 1)
             }
         }
     }
+
+    /// 按整场聚类的结果重建每位说话人的声纹
+    fn reset(&mut self, segments: &[Segment], speaker: &[Option<usize>]) {
+        let k = speaker.iter().flatten().max().map_or(0, |m| m + 1);
+        self.centroids = (0..k)
+            .map(|i| {
+                let of_i = segments.iter().zip(speaker).filter(|(_, s)| **s == Some(i)).flat_map(|(g, _)| &g.embeddings);
+                unit_sum(of_i).unwrap_or_default()
+            })
+            .collect();
+    }
+}
+
+/// 一组声纹各自归一化后相加；没有声纹时 None
+fn unit_sum<'a>(embeddings: impl Iterator<Item = &'a Vec<f32>>) -> Option<Vec<f32>> {
+    let mut sum: Option<Vec<f32>> = None;
+    for e in embeddings {
+        let n = norm(e);
+        let acc = sum.get_or_insert_with(|| vec![0.0; e.len()]);
+        for (a, v) in acc.iter_mut().zip(e) {
+            *a += v / n;
+        }
+    }
+    sum
 }
 
 fn norm(v: &[f32]) -> f32 {
@@ -323,6 +343,34 @@ impl LiveState {
             self.lines.push(LiveLine { start_ms: g.start_ms, speaker, text: g.text.clone() });
         }
     }
+
+    /// 该整场重新聚类了吗：有新的句子、声纹够聚类（太少时 [`cluster`] 只会归成一人），离上次够久
+    fn recluster_due(&self) -> bool {
+        let segs = &self.chunker.segments;
+        segs.len() > self.clustered
+            && segs.iter().map(|g| g.embeddings.len()).sum::<usize>() >= 20
+            && self.clustered_at.is_none_or(|t| t.elapsed() >= LIVE_RECLUSTER.max(self.cluster_cost * 5))
+    }
+
+    /// 用整场聚类的结果（`speaker` 对应前 `speaker.len()` 段）改正各句的说话人；聚类期间新出的几句按新声纹重新归类
+    fn apply_speakers(&mut self, speaker: &[Option<usize>], cost: Duration) {
+        let segs = &self.chunker.segments;
+        self.speakers.reset(&segs[..speaker.len()], speaker);
+        let (mut changed, mut prev) = (false, None);
+        for (i, line) in self.lines.iter_mut().enumerate() {
+            let spk = match speaker.get(i) {
+                Some(s) => *s,
+                None => self.speakers.assign(&segs[i].embeddings).or(prev),
+            };
+            changed |= line.speaker != spk;
+            line.speaker = spk;
+            prev = spk;
+        }
+        self.speaker_rev += changed as u64;
+        self.clustered = speaker.len();
+        self.clustered_at = Some(Instant::now());
+        self.cluster_cost = cost;
+    }
 }
 
 impl LiveState {
@@ -379,6 +427,10 @@ impl LiveTranscriber {
             speech_ends: Vec::new(),
             lines: Vec::new(),
             speakers: LiveSpeakers::default(),
+            speaker_rev: 0,
+            clustered: 0,
+            clustered_at: None,
+            cluster_cost: Duration::ZERO,
             lags: Vec::new(),
             error: None,
         };
@@ -388,7 +440,7 @@ impl LiveTranscriber {
             let (inner, stop) = (inner.clone(), stop.clone());
             std::thread::spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
-                    if !step(&inner, &engine, false) {
+                    if !step(&inner, &engine, false) & !recluster(&inner) {
                         std::thread::sleep(LIVE_POLL);
                     }
                 }
@@ -407,10 +459,12 @@ impl LiveTranscriber {
         s.lines[s.lines.len().saturating_sub(n)..].to_vec()
     }
 
-    /// 从第 `from` 句起的全部句子和总句数：界面只取新增的，长会议也不用每次传整场
-    pub fn lines_from(&self, from: usize) -> (Vec<LiveLine>, usize) {
+    /// 从第 `from` 句起的全部句子、总句数和说话人版本：界面只取新增的，长会议也不用每次传整场。
+    /// 界面手里的说话人版本 `rev` 已经过时（整场重新聚类改过前面的句子）时从头给。
+    pub fn lines_from(&self, from: usize, rev: u64) -> (Vec<LiveLine>, usize, u64) {
         let s = self.inner.lock().unwrap();
-        (s.lines[from.min(s.lines.len())..].to_vec(), s.lines.len())
+        let from = if rev == s.speaker_rev { from.min(s.lines.len()) } else { 0 };
+        (s.lines[from..].to_vec(), s.lines.len(), s.speaker_rev)
     }
 
     /// 到目前为止识别出了多少句（有没有新出文字，自动结束录音时用来判断有没有人说话）。
@@ -457,6 +511,21 @@ impl LiveTranscriber {
     }
 }
 
+/// 到时候了就整场重新聚类说话人，改正前面各句的临时编号；返回是否聚了类。聚类时不持锁。
+fn recluster(inner: &Mutex<LiveState>) -> bool {
+    let segs = {
+        let s = inner.lock().unwrap();
+        if !s.recluster_due() {
+            return false;
+        }
+        s.chunker.segments.clone()
+    };
+    let t = Instant::now();
+    let speaker = segment_speakers(&segs);
+    inner.lock().unwrap().apply_speakers(&speaker, t.elapsed());
+    true
+}
+
 /// 读新数据、必要时切一段识别；返回这一步是否处理了一段。
 fn step(inner: &Mutex<LiveState>, engine: &Engine, last: bool) -> bool {
     let job = {
@@ -497,5 +566,38 @@ mod live_tests {
         assert_eq!(s.assign(&[b]), Some(1));
         // 太短提不出声纹：不编号，由调用方沿用上一句
         assert_eq!(s.assign(&[]), None);
+    }
+
+    #[test]
+    fn recluster_fixes_earlier_lines_and_bumps_revision() {
+        let seg = |e: Vec<f32>| Segment { start_ms: 0, end_ms: 0, text: String::new(), embeddings: vec![e] };
+        let (a, b) = (vec![1.0, 0.0, 0.0], vec![0.0, 1.0, 0.0]);
+        let mut s = LiveState {
+            tracks: Vec::new(),
+            mixed_until: 0.0,
+            chunker: Chunker::default(),
+            vad: None,
+            vad_fed: 0,
+            speech_ends: Vec::new(),
+            lines: Vec::new(),
+            speakers: LiveSpeakers::default(),
+            speaker_rev: 0,
+            clustered: 0,
+            clustered_at: None,
+            cluster_cost: Duration::ZERO,
+            lags: Vec::new(),
+            error: None,
+        };
+        // 临时编号分得太碎：两个人被编成了 4 位
+        let segs = vec![seg(a.clone()), seg(b.clone()), seg(vec![0.6, 0.0, 0.8]), seg(vec![0.0, 0.8, 0.6]), Segment { embeddings: vec![], ..seg(a.clone()) }];
+        s.lines = (0..5).map(|i| LiveLine { start_ms: i, speaker: Some(i as usize), text: String::new() }).collect();
+        s.chunker.segments = segs;
+        // 整场聚类只覆盖前 3 段，后两段是聚类期间新出的：按新声纹归类，提不出声纹的沿用上一句
+        s.apply_speakers(&[Some(0), Some(1), Some(0)], Duration::ZERO);
+        assert_eq!(s.lines.iter().map(|l| l.speaker).collect::<Vec<_>>(), [Some(0), Some(1), Some(0), Some(1), Some(1)]);
+        assert_eq!((s.speaker_rev, s.clustered), (1, 3));
+        // 结果没变就不加版本
+        s.apply_speakers(&[Some(0), Some(1), Some(0), Some(1), Some(1)], Duration::ZERO);
+        assert_eq!(s.speaker_rev, 1);
     }
 }

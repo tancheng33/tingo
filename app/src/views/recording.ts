@@ -21,6 +21,8 @@ const FLAG = '<svg viewBox="0 0 24 24"><path d="M5 21V4M5 4h11l-2 4 2 4H5"/></sv
 let state: {
   job: string;
   lines: Line[];
+  /** 说话人版本：录音中整场重新聚类改过前面句子的说话人时，后端从头给，这里整场重画 */
+  rev: number;
   marks: number[];
   /** 后端没有 /api/live（Python 版）：退回任务里的最近几句 */
   legacy: boolean;
@@ -41,7 +43,7 @@ const titleOf = (job: Job) => (job.meeting ?? "").replace(/^\d{4}-\d{2}-\d{2}_\d
 export const isRecordingPage = (): boolean => !!$maybe("#recWork");
 
 export function renderRecording(job: Job): void {
-  state = { job: job.id ?? "", lines: [], marks: [], legacy: false, fetching: false, lastFetch: 0, following: true, seen: 0, autoScrollUntil: 0 };
+  state = { job: job.id ?? "", lines: [], rev: 0, marks: [], legacy: false, fetching: false, lastFetch: 0, following: true, seen: 0, autoScrollUntil: 0 };
   const started = job.started_at ? new Date(job.started_at * 1000) : new Date(Date.now() - (job.elapsed ?? 0) * 1000);
   const mod = navigator.platform.startsWith("Mac") ? "⌘" : "Ctrl+";
   main().innerHTML = `
@@ -58,7 +60,7 @@ export function renderRecording(job: Job): void {
           .join("")}</div>
         <div class="rec-actions">
           <button class="btn" id="markBtn" title="${t(`标记现在说的内容（${mod}M）`, `Mark this moment (${mod}M)`)}">${FLAG}<span>${t("标记重点", "Mark")}</span><b class="mark-count" id="markCount" hidden></b></button>
-          <button class="btn rec-stop" id="stopBtn">${t("结束录音", "Stop")}</button>
+          <button class="btn rec-stop" id="stopBtn" aria-label="${t("结束录音", "Stop recording")}">${t("结束录音", "Stop")}</button>
         </div>
       </header>
       <p class="rec-note" id="recNote"></p>
@@ -154,8 +156,14 @@ async function fetchLines(): Promise<void> {
   s.fetching = true;
   s.lastFetch = Date.now();
   try {
-    const r = await api<{ job: string; from: number; total: number; lines: Line[]; marks: number[] }>(`/api/live?from=${s.lines.length}`);
+    const r = await api<{ job: string; from: number; total: number; rev?: number; lines: Line[]; marks: number[] }>(`/api/live?from=${s.lines.length}&rev=${s.rev}`);
     if (state !== s || r.job !== s.job) return;
+    // 说话人重新区分过：后端从头给了整场，清掉重画
+    if ((r.rev ?? 0) !== s.rev && r.from === 0) {
+      s.rev = r.rev ?? 0;
+      s.lines = [];
+      $("#recLines").querySelectorAll(".rec-para").forEach((p) => p.remove());
+    }
     // 起点对不上（比如重连后后端重启过）：整场重取
     if (r.from !== s.lines.length) {
       s.lines = [];
