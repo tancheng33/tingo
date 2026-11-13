@@ -1,6 +1,6 @@
 [package]
 name = "tingo-engine"
-version = "0.5.4"
+version = "0.5.5"
 description = "纪要的核心：识别、说话人区分、会议存储、纪要生成"
 authors = ["stardust <642720202@qq.com>"]
 license = "MIT"

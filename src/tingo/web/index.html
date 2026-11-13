@@ -5,44 +5,61 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Tingo 听过</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='tw' x1='0' y1='0' x2='1' y2='0'%3E%3Cstop offset='0' stop-color='%231F4BFF'/%3E%3Cstop offset='1' stop-color='%232AA8F0'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect x='0.5' y='0.5' width='31' height='31' rx='7.2' fill='%23fff' stroke='%231B2A6B' stroke-opacity='0.12'/%3E%3Cpath d='M12.35 7.38H8.23V16.39M19.65 24.62H23.77V15.61' fill='none' stroke='%230E1430' stroke-width='1.95' stroke-linecap='round' stroke-linejoin='round'/%3E%3Crect x='10.29' y='14.21' width='1.63' height='3.57' rx='0.81' fill='url%28%23tw%29'/%3E%3Crect x='12.74' y='11.92' width='1.63' height='8.16' rx='0.81' fill='url%28%23tw%29'/%3E%3Crect x='15.18' y='9.59' width='1.63' height='12.82' rx='0.81' fill='url%28%23tw%29'/%3E%3Crect x='17.63' y='12.58' width='1.63' height='6.83' rx='0.81' fill='url%28%23tw%29'/%3E%3Crect x='20.08' y='14.52' width='1.63' height='2.95' rx='0.81' fill='url%28%23tw%29'/%3E%3C/svg%3E">
-  <script type="module" crossorigin src="/assets/index-B0XdUght.js"></script>
-  <link rel="stylesheet" crossorigin href="/assets/index-B-zEGcOm.css">
+  <script type="module" crossorigin src="/assets/index-BJX7eG6d.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-BpxkYGaV.css">
 </head>
 <body>
-  <div class="app">
-    <aside class="sidebar">
-      <a class="brand" href="#/">
-        <span class="brand-mark" aria-hidden="true">
-          <svg viewBox='0 0 32 32'><defs><linearGradient id='bm' x1='0' y1='0' x2='1' y2='0'><stop offset='0' stop-color='#1F4BFF'/><stop offset='1' stop-color='#2AA8F0'/></linearGradient></defs><rect x='0.5' y='0.5' width='31' height='31' rx='7.2' fill='#fff' stroke='#1B2A6B' stroke-opacity='0.12'/><path d='M12.35 7.38H8.23V16.39M19.65 24.62H23.77V15.61' fill='none' stroke='#0E1430' stroke-width='1.95' stroke-linecap='round' stroke-linejoin='round'/><rect x='10.29' y='14.21' width='1.63' height='3.57' rx='0.81' fill='url(#bm)'/><rect x='12.74' y='11.92' width='1.63' height='8.16' rx='0.81' fill='url(#bm)'/><rect x='15.18' y='9.59' width='1.63' height='12.82' rx='0.81' fill='url(#bm)'/><rect x='17.63' y='12.58' width='1.63' height='6.83' rx='0.81' fill='url(#bm)'/><rect x='20.08' y='14.52' width='1.63' height='2.95' rx='0.81' fill='url(#bm)'/></svg>
-        </span>
-        <span class="brand-name">Tingo</span>
-        <span class="brand-tag" data-t="听过|听过">听过</span>
-      </a>
+  <div class="app booting" id="app">
+    <aside class="sidebar" id="sidebar">
+      <div class="side-inner">
+        <div class="side-top">
+          <a class="brand" href="#/">
+            <span class="brand-mark" aria-hidden="true">
+              <svg viewBox='0 0 32 32'><defs><linearGradient id='bm' x1='0' y1='0' x2='1' y2='0'><stop offset='0' stop-color='#1F4BFF'/><stop offset='1' stop-color='#2AA8F0'/></linearGradient></defs><rect x='0.5' y='0.5' width='31' height='31' rx='7.2' fill='#fff' stroke='#1B2A6B' stroke-opacity='0.12'/><path d='M12.35 7.38H8.23V16.39M19.65 24.62H23.77V15.61' fill='none' stroke='#0E1430' stroke-width='1.95' stroke-linecap='round' stroke-linejoin='round'/><rect x='10.29' y='14.21' width='1.63' height='3.57' rx='0.81' fill='url(#bm)'/><rect x='12.74' y='11.92' width='1.63' height='8.16' rx='0.81' fill='url(#bm)'/><rect x='15.18' y='9.59' width='1.63' height='12.82' rx='0.81' fill='url(#bm)'/><rect x='17.63' y='12.58' width='1.63' height='6.83' rx='0.81' fill='url(#bm)'/><rect x='20.08' y='14.52' width='1.63' height='2.95' rx='0.81' fill='url(#bm)'/></svg>
+            </span>
+            <span class="brand-name">Tingo</span>
+            <span class="brand-tag" data-t="听过|听过">听过</span>
+          </a>
+          <button class="side-toggle" id="sideToggle" type="button" aria-controls="sidebar" aria-expanded="true">
+            <svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="3.5"/><path d="M9.5 4.5v15"/></svg>
+          </button>
+        </div>
 
-      <nav class="nav">
-        <a href="#/" data-nav="home">
-          <svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg>
-          <span data-t="新会议|New meeting">新会议</span>
+        <a class="side-item new-meeting" href="#/" data-nav="home">
+          <span class="side-ico">
+            <svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg>
+            <span class="live-dot"></span>
+          </span>
+          <span class="side-label" data-t="新会议|New meeting">新会议</span>
         </a>
-        <a href="#/meetings" data-nav="meetings">
-          <svg viewBox="0 0 24 24"><rect x="4" y="3.5" width="16" height="17" rx="3"/><path d="M8 8.5h8M8 12h8M8 15.5h5"/></svg>
-          <span data-t="会议记录|Meetings">会议记录</span>
-        </a>
-        <a href="#/settings" data-nav="settings">
-          <svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg>
-          <span data-t="设置|Settings">设置</span>
-        </a>
-      </nav>
 
-      <div class="side-tasks" id="sideTasks" hidden></div>
+        <nav class="nav">
+          <a class="side-item" href="#/meetings" data-nav="meetings">
+            <svg viewBox="0 0 24 24"><rect x="4" y="3.5" width="16" height="17" rx="3"/><path d="M8 8.5h8M8 12h8M8 15.5h5"/></svg>
+            <span class="side-label" data-t="会议记录|Meetings">会议记录</span>
+          </a>
+          <a class="side-item rail-only" id="railTasks" href="#/" hidden></a>
+        </nav>
 
-      <div class="recent">
-        <div class="recent-head" data-t="最近|Recent">最近</div>
-        <div id="recentList"></div>
+        <div class="side-scroll">
+          <div class="side-tasks" id="sideTasks" hidden></div>
+          <div class="recent">
+            <div class="recent-head" data-t="最近|Recent">最近</div>
+            <div id="recentList"></div>
+          </div>
+        </div>
+
+        <div class="side-foot">
+          <div class="env" id="envBox"></div>
+          <a class="side-item rail-only" id="envRail" href="#/settings/about" hidden></a>
+          <a class="side-item" href="#/settings" data-nav="settings">
+            <svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg>
+            <span class="side-label" data-t="设置|Settings">设置</span>
+          </a>
+        </div>
       </div>
-
-      <div class="env" id="envBox"></div>
     </aside>
+    <div class="side-scrim" id="sideScrim" hidden></div>
 
     <main class="main" id="main"></main>
   </div>

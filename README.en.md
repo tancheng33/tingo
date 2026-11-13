@@ -28,6 +28,14 @@ Looking for a **free, open-source, local alternative to Otter.ai, Granola, Firef
 
 > The meetings, names and numbers in the screenshots are fictional demo data.
 
+## v0.5.5 · Steadier live speakers, narrow windows
+
+- While you record, speakers are re-clustered across the whole meeting and earlier labels are corrected. In two three-person test meetings, live labels used to grow to 50–90+ speakers; they now settle on three, matching the final transcript.
+- The sidebar collapses to an icon rail, automatically on narrow windows, where it opens as an overlay. The minimum window width drops from 1000 to 720 px.
+- When collapsed, setup problems and background tasks each get one icon that links to the right settings page or task.
+
+[Download v0.5.5](https://github.com/tancheng33/tingo/releases/tag/v0.5.5). In-app updates are available from v0.5.2 onward.
+
 ## v0.5.4 · Live transcription and recording workspace
 
 - Follow live transcripts with provisional speaker labels, scroll back through the meeting, and mark key moments.

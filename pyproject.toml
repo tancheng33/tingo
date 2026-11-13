@@ -1,6 +1,6 @@
 [project]
 name = "tingo"
-version = "0.5.4"
+version = "0.5.5"
 description = "本地中文会议录音、转写、说话人区分，一键生成会议纪要（FunASR + 任意 OpenAI 兼容大模型）"
 license = "MIT"
 keywords = ["meeting-minutes", "asr", "funasr", "chinese", "speaker-diarization", "transcription", "会议纪要"]
