@@ -414,7 +414,7 @@ def ui(
             window = None
         else:
             window = webview.create_window(
-                "纪要", url, width=1320, height=860, min_size=(1000, 680), background_color="#FAFAFC"
+                "纪要", url, width=1320, height=860, min_size=(720, 680), background_color="#FAFAFC"
             )
     if window is None:
         console.print(f"纪要已在浏览器打开：{url}  按 Ctrl+C 退出")

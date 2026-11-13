@@ -6,12 +6,14 @@ import { shouldOnboard } from "./views/welcome";
 import { $, setupModal } from "./dom";
 import { poll } from "./poll";
 import { route } from "./router";
+import { refreshShell, setupShell } from "./shell";
 import { refreshEnv, refreshMeetings } from "./sidebar";
 import { S } from "./state";
 import { setupPlayerKeys } from "./views/detail";
 import { setupImport } from "./views/home";
 
 async function boot(): Promise<void> {
+  setupShell();
   try {
     await initApi();
   } catch (e) {
@@ -25,6 +27,7 @@ async function boot(): Promise<void> {
     /* 拿不到配置就按系统语言 */
   }
   renderShell();
+  refreshShell();
   setupModal();
   setupImport();
   setupPlayerKeys();

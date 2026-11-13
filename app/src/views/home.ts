@@ -25,14 +25,14 @@ export function renderHome(): void {
   }
   leaveRecording();
   main().innerHTML = `
-    <div class="page">
+    <div class="page home-page">
       <div class="hero-head">
         <span class="hero-tag"><b></b>${t("本地转写 · 录音不出本机", "On-device transcription · audio never leaves your Mac")}</span>
         <h1>${t("开个会，纪要交给我", "Have the meeting. Tingo takes the notes.")}</h1>
         <p>${t("录下会议，自动转写、区分说话人，整理出议题、决议和待办", "Record, transcribe, tell speakers apart — and get topics, decisions and action items")}</p>
       </div>
       <section class="aurora" id="aurora">
-        <i class="blob b1"></i><i class="blob b2"></i><i class="blob b3"></i><i class="blob b4"></i><i class="grain"></i>
+        <div class="aurora-colors" aria-hidden="true"><i class="blob b1"></i><i class="blob b2"></i><i class="blob b3"></i><i class="blob b4"></i><i class="grain"></i></div>
         <div class="glass-ring"><div class="glass" id="glass"></div></div>
       </section>
       <div class="home-tasks" id="homeTasks"></div>
@@ -92,11 +92,11 @@ function idleForm(): string {
     <input class="title-input" id="fTitle" placeholder="${t("会议名称，比如：周会、项目评审", "Meeting name, e.g. Weekly sync, Design review")}" value="${esc(S.form.title)}" maxlength="60">
     <input class="hot-input" id="fHot" placeholder="${t("热词（可选）：人名、项目代号、专有名词，用逗号隔开", "Hotwords (optional): names, project codes, jargon — comma separated")}" value="${esc(S.form.hotwords)}">
     <div class="glass-foot">
-      <button class="toggle ${S.form.system && sys ? "on" : ""}" id="tSys" ${sys ? "" : `disabled title='${t("需要 macOS 15+", "Requires macOS 15+")}'`}>${ICON.monitor}${t("系统声音", "System audio")}</button>
-      <button class="toggle ${S.form.mic ? "on" : ""}" id="tMic">${ICON.mic}${t("麦克风", "Microphone")}</button>
+      <button class="toggle ${S.form.system && sys ? "on" : ""}" id="tSys" aria-pressed="${Boolean(S.form.system && sys)}" ${sys ? "" : `disabled title='${t("需要 macOS 15+", "Requires macOS 15+")}'`}>${ICON.monitor}${t("系统声音", "System audio")}</button>
+      <button class="toggle ${S.form.mic ? "on" : ""}" id="tMic" aria-pressed="${Boolean(S.form.mic)}">${ICON.mic}${t("麦克风", "Microphone")}</button>
       <span class="spacer"></span>
       <span class="rec-label">${t("开始录音", "Record")}</span>
-      <button class="rec-btn" id="recBtn" title="${t("开始录音", "Start recording")}"><span class="core"></span></button>
+      <button class="rec-btn" id="recBtn" aria-label="${t("开始录音", "Start recording")}" title="${t("开始录音", "Start recording")}"><span class="core" aria-hidden="true"></span></button>
     </div>`;
 }
 
@@ -154,10 +154,12 @@ function bindHome(phase: Phase): void {
     $("#tSys").onclick = (e) => {
       S.form.system = !S.form.system;
       (e.currentTarget as HTMLElement).classList.toggle("on", S.form.system);
+      (e.currentTarget as HTMLElement).setAttribute("aria-pressed", String(S.form.system));
     };
     $("#tMic").onclick = (e) => {
       S.form.mic = !S.form.mic;
       (e.currentTarget as HTMLElement).classList.toggle("on", S.form.mic);
+      (e.currentTarget as HTMLElement).setAttribute("aria-pressed", String(S.form.mic));
     };
     $("#recBtn").onclick = startRecording;
   } else if (phase === "error") {
@@ -174,7 +176,13 @@ async function startRecording(): Promise<void> {
   const sys = S.form.system && (!S.env || S.env.system_audio);
   if (!sys && !S.form.mic) return toast(t("系统声音和麦克风至少开一个", "Turn on system audio or the microphone"), true);
   const btn = $maybe<HTMLButtonElement>("#recBtn");
-  if (btn) btn.disabled = true;
+  if (btn?.disabled) return;
+  if (btn) {
+    btn.disabled = true;
+    btn.setAttribute("aria-busy", "true");
+    const label = btn.previousElementSibling;
+    if (label) label.textContent = t("正在启动…", "Starting…");
+  }
   try {
     S.job = await api<Job>("/api/record/start", {
       json: {
@@ -188,7 +196,12 @@ async function startRecording(): Promise<void> {
     poll();
   } catch (e) {
     toast(errorMessage(e), true);
-    if (btn) btn.disabled = false;
+    if (btn) {
+      btn.disabled = false;
+      btn.removeAttribute("aria-busy");
+      const label = btn.previousElementSibling;
+      if (label) label.textContent = t("开始录音", "Record");
+    }
   }
 }
 
@@ -197,7 +210,12 @@ function bindStop(): void {
 }
 
 async function stopRecording(): Promise<void> {
-  $<HTMLButtonElement>("#stopBtn").disabled = true;
+  const btn = $<HTMLButtonElement>("#stopBtn");
+  if (btn.disabled) return;
+  btn.disabled = true;
+  btn.setAttribute("aria-busy", "true");
+  btn.textContent = t("正在保存…", "Saving…");
+  btn.setAttribute("aria-label", btn.textContent);
   try {
     await api("/api/record/stop", { method: "POST" });
     toast(t("录音已保存，转写和纪要在后台进行，可以开始下一场", "Saved. Transcription and minutes continue in the background — you can start the next meeting"));
@@ -206,6 +224,10 @@ async function stopRecording(): Promise<void> {
     poll();
   } catch (e) {
     toast(errorMessage(e), true);
+    btn.disabled = false;
+    btn.removeAttribute("aria-busy");
+    btn.textContent = t("结束录音", "Stop");
+    btn.setAttribute("aria-label", t("结束录音", "Stop recording"));
   }
 }
 

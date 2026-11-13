@@ -14,21 +14,23 @@ const linkOf = (j: Job) =>
         ? "#/settings/about"
         : `#/m/${encodeURIComponent(j.meeting ?? "")}`;
 
-function item(j: Job, big: boolean): string {
-  const busy = isBusy(j);
-  const rec = j.state === "recording";
-  const pct = Math.round(progressOf(j) * 100);
-  const icon = rec
+const statusIcon = (j: Job): string =>
+  j.state === "recording"
     ? `<span class="live-dot"></span>`
-    : busy
+    : isBusy(j)
       ? `<span class="task-spin"></span>`
       : j.state === "done"
         ? `<span class="task-ok">✓</span>`
         : `<span class="task-err">!</span>`;
+
+function item(j: Job, big: boolean): string {
+  const busy = isBusy(j);
+  const rec = j.state === "recording";
+  const pct = Math.round(progressOf(j) * 100);
   const detail = rec ? `${t("录音中", "Recording")} ${fmt((j.elapsed ?? 0) * 1000)}` : jobDetail(j);
   return `
     <a class="task ${j.state} ${big ? "big" : ""}" href="${linkOf(j)}" data-id="${esc(j.id ?? "")}">
-      <span class="task-ico">${icon}</span>
+      <span class="task-ico">${statusIcon(j)}</span>
       <span class="task-main">
         <span class="task-title">${esc(jobTitle(j))}</span>
         <span class="task-detail">${esc(detail)}</span>
@@ -58,13 +60,31 @@ function bind(box: HTMLElement): void {
 
 /** 侧边栏：所有任务的紧凑列表；首页：后台任务的大卡片（录音本身在玻璃面板里，不重复显示） */
 export function renderTasks(): void {
-  const homeLabel = $maybe('.nav [data-nav="home"] [data-t]');
+  const recording = S.job.state === "recording";
+  const homeLabel = $maybe('#sidebar [data-nav="home"] [data-t]');
   if (homeLabel) {
-    const [zh, en] = S.job.state === "recording" ? ["返回录音", "Back to recording"] : ["新会议", "New meeting"];
+    const [zh, en] = recording ? ["返回录音", "Back to recording"] : ["新会议", "New meeting"];
     const label = t(zh, en);
     if (homeLabel.textContent !== label) {
       homeLabel.dataset.t = `${zh}|${en}`;
       homeLabel.textContent = label;
+    }
+    homeLabel.parentElement?.classList.toggle("recording", recording);
+  }
+  // 侧边栏收成图标栏时：后台任务并成一个图标（录音本身显示在「新会议」按钮上）
+  const rail = $maybe<HTMLAnchorElement>("#railTasks");
+  if (rail) {
+    const list = S.jobs.filter((j) => j.state !== "idle" && j.state !== "recording");
+    const top = list.find(isBusy) ?? list.find((j) => j.state === "error") ?? list[0];
+    rail.hidden = !top;
+    if (top) {
+      const html = `<span class="side-ico">${statusIcon(top)}</span><span class="side-label">${esc(jobTitle(top))}</span>${list.length > 1 ? `<b class="rail-count">${list.length}</b>` : ""}`;
+      if (rail.dataset.html !== html) {
+        rail.dataset.html = html;
+        rail.innerHTML = html;
+      }
+      rail.href = linkOf(top);
+      rail.dataset.tip = `${jobTitle(top)} · ${jobDetail(top)}${list.length > 1 ? t(`（共 ${list.length} 个任务）`, ` (${list.length} tasks)`) : ""}`;
     }
   }
   const side = $maybe("#sideTasks");

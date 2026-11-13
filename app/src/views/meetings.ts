@@ -2,6 +2,7 @@ import { api, type MeetingSummary } from "../api";
 import { isEn, speakerName, t } from "../i18n";
 import { $, $$, $maybe, color, errorMessage, esc, fmt, ICON, initial, main, toast } from "../dom";
 import { allTags, batch, type BatchAction, confirmBox, editTags, fmtBytes } from "../manage";
+import { searchShortcut } from "../shell";
 import { refreshMeetings } from "../sidebar";
 import { S } from "../state";
 
@@ -16,7 +17,7 @@ export function renderMeetings(): void {
       <div class="page-head">
         <div><h1>${t("会议<em>.</em>记录", "Meetings<em>.</em>")}</h1><div class="sub" id="mCount"></div></div>
         <span class="grow"></span>
-        <label class="search">${ICON.search}<input class="input" id="mSearch" placeholder="${t("搜索会议里说过的话", "Search everything that was said")}"></label>
+        <label class="search">${ICON.search}<input class="input" id="mSearch" placeholder="${t("搜索会议里说过的话", "Search everything that was said")}"><kbd aria-hidden="true">${searchShortcut()}</kbd></label>
       </div>
       <div class="m-tools" id="mTools"></div>
       <div id="mList"></div>

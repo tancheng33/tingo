@@ -1,7 +1,7 @@
 import { t } from "./i18n";
 import { showUpdate, updateInfo } from "./update";
 import { api, type Env, type MeetingSummary } from "./api";
-import { $, esc } from "./dom";
+import { $, $maybe, esc } from "./dom";
 import { S } from "./state";
 
 export async function refreshMeetings(): Promise<void> {
@@ -33,7 +33,8 @@ export async function refreshEnv(): Promise<void> {
     return;
   }
   const e = S.env;
-  const rows: [string, string][] = [
+  // [状态, 文字, 有问题时去哪个设置页]
+  const rows: [string, string, string][] = [
     [
       e.model_loaded || e.model_cached ? "" : "warn",
       e.model_loaded
@@ -43,14 +44,22 @@ export async function refreshEnv(): Promise<void> {
           : e.models_downloadable
             ? t("识别模型未下载", "Speech model not downloaded")
             : t("首次转写会下载模型", "Model downloads on first use"),
+      e.models_downloadable ? "asr" : "about",
     ],
-    [e.llm_ready ? "" : "bad", e.llm_ready ? e.llm_model : t("未配置大模型", "No LLM configured")],
-    [e.system_audio ? "" : "warn", e.system_audio ? t("可录系统声音", "System audio available") : t("仅能录麦克风", "Microphone only")],
+    [e.llm_ready ? "" : "bad", e.llm_ready ? e.llm_model : t("未配置大模型", "No LLM configured"), "llm"],
+    [e.system_audio ? "" : "warn", e.system_audio ? t("可录系统声音", "System audio available") : t("仅能录麦克风", "Microphone only"), "about"],
   ];
+  const update = updateInfo()?.newer ? updateInfo() : null;
   $("#envBox").innerHTML =
-    rows.map(([c, t]) => `<div class="env-row"><span class="env-dot ${c}"></span><span>${esc(t)}</span></div>`).join("") +
-    `<div class="env-row" style="color:var(--muted-2)">v${esc(e.version)}${
-      updateInfo()?.newer ? ` <a class="update-dot" id="upLink" href="#">${t(`新版本 ${esc(updateInfo()?.latest ?? "")}`, `Update ${esc(updateInfo()?.latest ?? "")}`)}</a>` : ""
+    rows
+      .map(([c, text, tab]) => {
+        const body = `<span class="env-dot ${c}"></span><span>${esc(text)}</span>`;
+        // 有问题的那行点了直接去对应的设置页
+        return c ? `<a class="env-row" href="#/settings/${tab}">${body}</a>` : `<div class="env-row">${body}</div>`;
+      })
+      .join("") +
+    `<div class="env-row env-ver">v${esc(e.version)}${
+      update ? ` <a class="update-dot" id="upLink" href="#">${t(`新版本 ${esc(update.latest ?? "")}`, `Update ${esc(update.latest ?? "")}`)}</a>` : ""
     }</div>`;
   const up = document.getElementById("upLink");
   if (up)
@@ -58,4 +67,15 @@ export async function refreshEnv(): Promise<void> {
       ev.preventDefault();
       showUpdate();
     };
+
+  // 收成图标栏时：一切正常就不占位置；有问题才出一个提醒图标（颜色跟最严重的那项），点了去对应的设置页
+  const worst = rows.find(([c]) => c === "bad") ?? rows.find(([c]) => c === "warn");
+  const rail = $("#envRail") as HTMLAnchorElement;
+  rail.hidden = !worst;
+  if (worst) {
+    rail.href = `#/settings/${worst[2]}`;
+    rail.dataset.tip = rows.filter(([c]) => c).map(([, text]) => text).join(" · ");
+    rail.innerHTML = `<span class="side-ico env-alert ${worst[0]}"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.8v5M12 16v.2"/></svg></span><span class="side-label">${esc(worst[1])}</span>`;
+  }
+  $maybe('.side-item[data-nav="settings"]')?.classList.toggle("has-update", !!update);
 }

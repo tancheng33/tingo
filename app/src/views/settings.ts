@@ -10,6 +10,7 @@ import { checkUpdate, showUpdate } from "../update";
 import { onboarded } from "./welcome";
 import { confirmBox, deleteAudio, fmtBytes } from "../manage";
 import { refreshMeetings } from "../sidebar";
+import { refreshShell } from "../shell";
 
 interface Preset {
   id: string;
@@ -314,6 +315,7 @@ async function save(x: Ctx, patch: Record<string, unknown>, tab: Tab): Promise<v
     const languageChanged = "ui_language" in patch && applyLang(patch.ui_language as LangPref);
     if (languageChanged) {
       renderShell();
+      refreshShell();
       refreshMeetings();
       localProviders = undefined;
     }
@@ -349,6 +351,14 @@ function updateSettingsNav(x: Ctx, cur: Tab): void {
   }
 }
 
+/** 窄窗口里二级菜单是横向滚动的一排：把当前这项滚到中间 */
+function revealTab(): void {
+  const nav = $maybe(".set-nav");
+  const on = $maybe(".set-nav a.on");
+  if (!nav || !on || nav.scrollWidth <= nav.clientWidth) return;
+  nav.scrollTo({ left: on.offsetLeft - (nav.clientWidth - on.offsetWidth) / 2, behavior: "smooth" });
+}
+
 export async function renderSettings(tab: string = "llm", updated?: Config): Promise<void> {
   const list = tabs().filter((tb) => tb.id !== "asr" || S.env?.models_downloadable);
   const cur = (list.find((tb) => tb.id === tab) ?? list[0]).id;
@@ -363,6 +373,7 @@ export async function renderSettings(tab: string = "llm", updated?: Config): Pro
   }
 
   $$(".set-nav a").forEach((a) => a.classList.toggle("on", a.dataset.tab === cur));
+  revealTab();
   const panel = document.createElement("section");
   panel.id = "sPanel";
   panel.className = "card s-card set-panel";
