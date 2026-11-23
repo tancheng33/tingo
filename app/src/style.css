@@ -109,9 +109,9 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .rail-only { display: none; }
 .side-collapsed .rail-only { display: flex; }
 
-.new-meeting { margin-bottom: 8px; padding: 0 8px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); box-shadow: var(--shadow-pill); color: var(--text); font-weight: 500; }
-.new-meeting:hover { background: var(--card); border-color: #c9d6ff; }
-.new-meeting.active { border-color: #b9c9ff; box-shadow: 0 0 0 3px rgba(31, 75, 255, 0.08); }
+/* 「新会议」靠蓝色话筒突出，平时不画卡片：白底卡片只表示「当前在这一页」，和其他项一致，不然在「会议记录」时两项看着都像选中 */
+.new-meeting { margin-bottom: 8px; padding: 0 8px; border: 1px solid transparent; border-radius: 12px; color: var(--text); font-weight: 500; }
+.new-meeting.active { background: var(--card); border-color: var(--line); box-shadow: var(--shadow-pill); }
 .new-meeting .side-ico svg { color: var(--blue); }
 .new-meeting .live-dot { display: none; }
 .new-meeting.recording { border-color: #fecdca; color: #b42318; }
