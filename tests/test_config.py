@@ -121,3 +121,25 @@ def test_storage_survives_other_setting_changes():
     restored.llm.model = "new-model"
     config.save(restored)
     assert config.load().storage_root == cfg.storage_root
+
+
+def test_llm_temperature_optional_roundtrip_and_bad_values_ignored():
+    for line, want in [
+        ("", None),
+        ("temperature = 1\n", 1.0),
+        ("temperature = 0.7\n", 0.7),
+        ("temperature = 9\n", None),
+        ('temperature = "1"\n', None),
+    ]:
+        config.CONFIG_PATH.write_text(f'[llm]\nmodel = "kimi"\n{line}', encoding="utf-8")
+        cfg = config.load()
+        assert (cfg.llm.model, cfg.llm.temperature) == ("kimi", want), line
+    cfg.llm.temperature = 1.0
+    config.save(cfg)
+    text = config.CONFIG_PATH.read_text(encoding="utf-8")
+    # 与桌面版写法一致：紧跟在 api 后面，写成浮点数
+    assert 'api = "openai"\ntemperature = 1.0\n\n[push]' in text
+    assert config.load().llm.temperature == 1.0
+    cfg.llm.temperature = None
+    config.save(cfg)
+    assert "temperature" not in config.CONFIG_PATH.read_text(encoding="utf-8")

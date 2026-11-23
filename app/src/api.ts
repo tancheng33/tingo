@@ -108,6 +108,8 @@ export interface Config {
   obsidian: ObsidianConfig;
   /** 接口协议：openai（OpenAI 兼容）| anthropic */
   api?: string;
+  /** 采样温度，null = 默认 0.2 */
+  temperature?: number | null;
   /** auto | zh | en */
   ui_language?: string;
   minutes_language?: string;

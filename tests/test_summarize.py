@@ -537,3 +537,60 @@ def test_guess_prompt_lists_speakers_and_truncates(monkeypatch):
         {"index": 0, "name": "林舟", "evidence": "我是林舟"}
     ]
     assert calls == [{"think": False, "system": sm.GUESS_SYSTEM_EN}]
+
+
+def test_temperature_rejected_is_resent_without_it(monkeypatch):
+    """issue #2：Kimi 只接受 temperature=1。模型因为温度回 400 时去掉 temperature 重发。"""
+    from types import SimpleNamespace as NS
+
+    import httpx
+    import openai
+
+    sent = []
+
+    def create(**kw):
+        sent.append(dict(kw))
+        if "temperature" in kw:
+            resp = httpx.Response(400, request=httpx.Request("POST", "https://api.moonshot.cn/v1/chat/completions"))
+            raise openai.BadRequestError(
+                "invalid temperature: only 1 is allowed for this model", response=resp, body=None
+            )
+        return iter([NS(choices=[NS(delta=NS(content="# 纪要"))])])
+
+    monkeypatch.setattr(sm, "_client", lambda cfg: NS(chat=NS(completions=NS(create=create))))
+    assert sm._chat(LLMConfig(api_key="x", model="kimi"), "p") == "# 纪要"
+    assert [s.get("temperature") for s in sent] == [0.2, None] and "temperature" not in sent[1]
+
+    # 设置里填了就先用填的
+    sent.clear()
+    sm._chat(LLMConfig(api_key="x", temperature=1.0), "p")
+    assert sent[0]["temperature"] == 1.0
+
+    # 别的 400 原样抛出、不重发
+
+    def other(**kw):
+        sent.append(kw)
+        resp = httpx.Response(400, request=httpx.Request("POST", "https://x"))
+        raise openai.BadRequestError("model not found", response=resp, body=None)
+
+    sent.clear()
+    monkeypatch.setattr(sm, "_client", lambda cfg: NS(chat=NS(completions=NS(create=other))))
+    with pytest.raises(openai.BadRequestError, match="model not found"):
+        sm._chat(LLMConfig(api_key="x"), "p")
+    assert len(sent) == 1
+
+
+def test_anthropic_temperature_rejected_is_resent_without_it(monkeypatch):
+    import httpx
+
+    bodies = []
+
+    def stream(method, url, headers, json, timeout):
+        bodies.append(dict(json))
+        if "temperature" in json:
+            return _SSE([], status=400, body=b'{"error":{"message":"temperature: only 1 is allowed"}}')
+        return _SSE([_text("# 纪要"), _event("message_stop")])
+
+    monkeypatch.setattr(httpx, "stream", stream)
+    assert sm._chat(ANTHROPIC, "p") == "# 纪要"
+    assert [b.get("temperature") for b in bodies] == [0.2, None]

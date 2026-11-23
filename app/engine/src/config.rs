@@ -10,6 +10,13 @@ pub struct LlmConfig {
     pub model: String,
     /// 接口协议："openai"（OpenAI 兼容的 chat/completions，默认）或 "anthropic"（Claude 的 messages）
     pub api: String,
+    /// [llm] temperature：采样温度（0～2），None = 默认 0.2。Kimi 等只接受 1 的模型可以改成 1
+    pub temperature: Option<f64>,
+}
+
+/// 设置里能填的温度范围
+pub fn valid_temperature(t: f64) -> bool {
+    t.is_finite() && (0.0..=2.0).contains(&t)
 }
 
 impl Default for LlmConfig {
@@ -19,6 +26,7 @@ impl Default for LlmConfig {
             api_key: String::new(),
             model: "deepseek-chat".into(),
             api: "openai".into(),
+            temperature: None,
         }
     }
 }
@@ -95,6 +103,8 @@ struct RawLlm {
     api_key: Option<String>,
     model: Option<String>,
     api: Option<String>,
+    // 写错类型（比如写成字符串）不能让整个配置读不出来，所以先按任意值读
+    temperature: Option<toml::Value>,
     hotwords: Option<Vec<String>>, // 早期模板误把 hotwords 写在 [llm] 下
 }
 
@@ -197,6 +207,11 @@ pub fn load(path: &Path) -> Config {
             api_key: raw.llm.api_key.unwrap_or_default(),
             model: raw.llm.model.unwrap_or(d.model),
             api: normalize_api(raw.llm.api.as_deref()),
+            temperature: raw
+                .llm
+                .temperature
+                .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+                .filter(|t| valid_temperature(*t)),
         },
         hotwords: raw.hotwords.or(raw.llm.hotwords).unwrap_or_default(),
         webhook: raw.push.webhook.unwrap_or_default(),
@@ -257,12 +272,13 @@ fn quote(s: &str) -> String {
 pub fn save(path: &Path, cfg: &Config) -> std::io::Result<()> {
     let words: Vec<String> = cfg.hotwords.iter().map(|w| quote(w)).collect();
     let text = format!(
-        "# tingo 配置，由图形界面写入；也可以直接编辑。\n\n# 专有名词、人名、项目代号，提高识别准确率\nhotwords = [{}]\n\n[llm]\nbase_url = {}\napi_key = {}\nmodel = {}\napi = {}\n\n[push]\nwebhook = {}\nsecret = {}\n\n[obsidian]\nvault = {}\nfolder = {}\nauto = {}\ntranscript = {}\n\n[ui]\nlanguage = {}\n\n[minutes]\nlanguage = {}\n\n[asr]\nlanguage = {}\n\n[record]\nauto_stop_silence_min = {}\nauto_stop_app_quit = {}\n\n[storage]\nroot = {}\n",
+        "# tingo 配置，由图形界面写入；也可以直接编辑。\n\n# 专有名词、人名、项目代号，提高识别准确率\nhotwords = [{}]\n\n[llm]\nbase_url = {}\napi_key = {}\nmodel = {}\napi = {}\n{}\n[push]\nwebhook = {}\nsecret = {}\n\n[obsidian]\nvault = {}\nfolder = {}\nauto = {}\ntranscript = {}\n\n[ui]\nlanguage = {}\n\n[minutes]\nlanguage = {}\n\n[asr]\nlanguage = {}\n\n[record]\nauto_stop_silence_min = {}\nauto_stop_app_quit = {}\n\n[storage]\nroot = {}\n",
         words.join(", "),
         quote(&cfg.llm.base_url),
         quote(&cfg.llm.api_key),
         quote(&cfg.llm.model),
         quote(&cfg.llm.api),
+        cfg.llm.temperature.map(|t| format!("temperature = {t:?}\n")).unwrap_or_default(),
         quote(&cfg.webhook),
         quote(&cfg.webhook_secret),
         quote(&cfg.obsidian.vault),
@@ -319,6 +335,7 @@ mod tests {
                 api_key: "k\"q".into(),
                 model: "deepseek/deepseek-v4-flash".into(),
                 api: "anthropic".into(),
+                temperature: Some(1.0),
             },
             storage_root: "/Volumes/会议资料/Tingo".into(),
             hotwords: vec!["星河".into(), "Kafka".into()],
@@ -342,6 +359,21 @@ mod tests {
         // 早期模板把 hotwords 写在 [llm] 下
         std::fs::write(&p, "[llm]\nmodel = \"m\"\nhotwords = [\"旧版\"]\n").unwrap();
         assert_eq!(load(&p).hotwords, vec!["旧版".to_string()]);
+    }
+
+    #[test]
+    fn temperature_is_optional_and_bad_values_are_ignored() {
+        let p = tmp("temp");
+        for (line, want) in [("", None), ("temperature = 1\n", Some(1.0)), ("temperature = 0.7\n", Some(0.7)), ("temperature = 9\n", None), ("temperature = \"1\"\n", None)] {
+            std::fs::write(&p, format!("[llm]\nmodel = \"kimi\"\n{line}")).unwrap();
+            let c = load(&p);
+            // 温度写错了也不能连带别的配置一起读不出来
+            assert_eq!((c.llm.model.as_str(), c.llm.temperature), ("kimi", want), "{line}");
+        }
+        let mut c = load(&p);
+        c.llm.temperature = None;
+        save(&p, &c).unwrap();
+        assert!(!std::fs::read_to_string(&p).unwrap().contains("temperature"));
     }
 
     #[test]

@@ -407,6 +407,44 @@ pub fn strip_think(text: &str, partial: bool) -> String {
     t
 }
 
+/// 纪要默认用低温度，少发挥。有的模型只接受默认值（Kimi、OpenAI 的推理模型只认 1），设置里可以改。
+pub const DEFAULT_TEMPERATURE: f64 = 0.2;
+
+fn temperature(cfg: &LlmConfig) -> f64 {
+    cfg.temperature.unwrap_or(DEFAULT_TEMPERATURE)
+}
+
+fn http_error(status: reqwest::StatusCode, text: &str) -> String {
+    let text: String = text.chars().take(300).collect();
+    tr(&format!("大模型返回 {status}：{text}"), &format!("The language model returned {status}: {text}")).into()
+}
+
+/// 发请求，返回成功的响应。模型因为 temperature 回 400 时（只接受默认温度的模型，比如 Kimi 只认 1），
+/// 去掉 temperature 用模型自己的默认值再发一次，不用用户先去设置里改。
+fn send_llm(
+    cfg: &LlmConfig,
+    mut body: serde_json::Value,
+    send: impl Fn(&serde_json::Value) -> reqwest::Result<reqwest::blocking::Response>,
+) -> Result<reqwest::blocking::Response, String> {
+    let unreachable = |e: reqwest::Error| -> String {
+        let url = &cfg.base_url;
+        tr(&format!("连不上大模型（{url}）：{e}"), &format!("Couldn't reach the language model ({url}): {e}")).into()
+    };
+    let mut resp = send(&body).map_err(unreachable)?;
+    if resp.status() == reqwest::StatusCode::BAD_REQUEST {
+        let text = resp.text().unwrap_or_default();
+        if !text.to_ascii_lowercase().contains("temperature") || body.as_object_mut().and_then(|b| b.remove("temperature")).is_none() {
+            return Err(http_error(reqwest::StatusCode::BAD_REQUEST, &text));
+        }
+        resp = send(&body).map_err(unreachable)?;
+    }
+    if !resp.status().is_success() {
+        let status = resp.status();
+        return Err(http_error(status, &resp.text().unwrap_or_default()));
+    }
+    Ok(resp)
+}
+
 /// 流式调用 chat/completions，返回去掉思考过程的完整回答。
 /// `on_think(已思考字数)`：推理模型先长时间思考，不报出来界面就像卡住了。
 /// 思考内容有的放在 reasoning_content / reasoning 字段，有的夹在正文的 <think> 里，两种都算。
@@ -437,7 +475,7 @@ pub fn chat(
     let mut body = serde_json::json!({
         "model": cfg.model,
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
-        "temperature": 0.2,
+        "temperature": temperature(cfg),
         "stream": true,
     });
     if !think && local {
@@ -449,32 +487,8 @@ pub fn chat(
         .timeout(Duration::from_secs(1800))
         .build()
         .map_err(|e| e.to_string())?;
-    let resp = client
-        .post(format!(
-            "{}/chat/completions",
-            cfg.base_url.trim_end_matches('/')
-        ))
-        .bearer_auth(key)
-        .json(&body)
-        .send()
-        .map_err(|e| {
-            let url = &cfg.base_url;
-            tr(
-                &format!("连不上大模型（{url}）：{e}"),
-                &format!("Couldn't reach the language model ({url}): {e}"),
-            )
-            .to_string()
-        })?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().unwrap_or_default();
-        let text: String = text.chars().take(300).collect();
-        return Err(tr(
-            &format!("大模型返回 {status}：{text}"),
-            &format!("The language model returned {status}: {text}"),
-        )
-        .into());
-    }
+    let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
+    let resp = send_llm(cfg, body, |body| client.post(&url).bearer_auth(&key).json(body).send())?;
     let mut raw = String::new();
     let mut shown = 0;
     let mut thought = 0usize;
@@ -574,7 +588,7 @@ fn chat_anthropic(
         "max_tokens": 16000,
         "system": system,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.2,
+        "temperature": temperature(cfg),
         "stream": true,
     });
     let client = reqwest::blocking::Client::builder()
@@ -582,29 +596,10 @@ fn chat_anthropic(
         .timeout(Duration::from_secs(1800))
         .build()
         .map_err(|e| e.to_string())?;
-    let resp = client
-        .post(format!("{}/messages", anthropic_v1(&cfg.base_url)))
-        .header("x-api-key", &cfg.api_key)
-        .header("anthropic-version", "2023-06-01")
-        .json(&body)
-        .send()
-        .map_err(|e| {
-            let url = &cfg.base_url;
-            tr(
-                &format!("连不上大模型（{url}）：{e}"),
-                &format!("Couldn't reach the language model ({url}): {e}"),
-            )
-            .to_string()
-        })?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text: String = resp.text().unwrap_or_default().chars().take(300).collect();
-        return Err(tr(
-            &format!("大模型返回 {status}：{text}"),
-            &format!("The language model returned {status}: {text}"),
-        )
-        .into());
-    }
+    let url = format!("{}/messages", anthropic_v1(&cfg.base_url));
+    let resp = send_llm(cfg, body, |body| {
+        client.post(&url).header("x-api-key", &cfg.api_key).header("anthropic-version", "2023-06-01").json(body).send()
+    })?;
     let mut raw = String::new();
     let mut shown = 0;
     let mut thought = 0usize;
@@ -796,6 +791,67 @@ fn strip_fence(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 本地假接口：依次用 `replies`（状态码, 正文）回答，返回收到的请求体
+    fn fixture(replies: Vec<(u16, &'static str)>) -> (String, std::thread::JoinHandle<Vec<serde_json::Value>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let mut bodies = Vec::new();
+            for (status, reply) in replies {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut length = 0usize;
+                loop {
+                    let mut header = String::new();
+                    reader.read_line(&mut header).unwrap();
+                    if header == "\r\n" { break; }
+                    if let Some(v) = header.to_ascii_lowercase().strip_prefix("content-length:") { length = v.trim().parse().unwrap(); }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                bodies.push(serde_json::from_slice(&body).unwrap());
+                write!(stream, "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len()).unwrap();
+            }
+            bodies
+        });
+        (url, server)
+    }
+
+    fn send_to(url: &str, cfg: &LlmConfig) -> Result<String, String> {
+        let client = reqwest::blocking::Client::new();
+        let body = serde_json::json!({"model": "kimi", "temperature": temperature(cfg)});
+        send_llm(cfg, body, |b| client.post(url).json(b).send()).map(|r| r.text().unwrap())
+    }
+
+    #[test]
+    fn temperature_rejection_is_resent_without_it() {
+        // issue #2：Kimi 只接受 temperature=1
+        let cfg = LlmConfig::default();
+        let (url, server) = fixture(vec![(400, r#"{"error":{"message":"invalid temperature: only 1 is allowed for this model"}}"#), (200, "ok")]);
+        assert_eq!(send_to(&url, &cfg).unwrap(), "ok");
+        let bodies = server.join().unwrap();
+        assert_eq!(bodies[0]["temperature"], 0.2);
+        assert!(bodies[1].get("temperature").is_none());
+
+        // 设置里填了温度就用填的
+        let cfg = LlmConfig { temperature: Some(1.0), ..LlmConfig::default() };
+        let (url, server) = fixture(vec![(200, "ok")]);
+        send_to(&url, &cfg).unwrap();
+        assert_eq!(server.join().unwrap()[0]["temperature"], 1.0);
+
+        // 别的 400 不重发，原样报出来
+        let (url, server) = fixture(vec![(400, "model not found")]);
+        let err = send_to(&url, &LlmConfig::default()).unwrap_err();
+        assert!(err.contains("400") && err.contains("model not found"), "{err}");
+        assert_eq!(server.join().unwrap().len(), 1);
+
+        // 去掉温度还是 400：报第二次的错，不再重发
+        let (url, server) = fixture(vec![(400, "bad temperature"), (400, "still bad")]);
+        assert!(send_to(&url, &LlmConfig::default()).unwrap_err().contains("still bad"));
+        assert_eq!(server.join().unwrap().len(), 2);
+    }
 
     #[test]
     fn anthropic_url_and_events() {
