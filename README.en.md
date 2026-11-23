@@ -28,44 +28,7 @@ Looking for a **free, open-source, local alternative to Otter.ai, Granola, Firef
 
 > The meetings, names and numbers in the screenshots are fictional demo data.
 
-## v0.5.6 · Works with models that only accept a fixed temperature
-
-- Fixes the 400 "invalid temperature: only 1 is allowed" from Kimi's OpenAI-compatible API when generating minutes ([#2](https://github.com/tancheng33/tingo/issues/2)). When a model rejects the temperature, the request is sent again without it — no settings change needed.
-- Settings → LLM has a new optional Temperature field; leave it empty for the default 0.2.
-
-[Download v0.5.6](https://github.com/tancheng33/tingo/releases/tag/v0.5.6). In-app updates are available from v0.5.2 onward.
-
-## v0.5.5 · Steadier live speakers, narrow windows
-
-- While you record, speakers are re-clustered across the whole meeting and earlier labels are corrected. In two three-person test meetings, live labels used to grow to 50–90+ speakers; they now settle on three, matching the final transcript.
-- The sidebar collapses to an icon rail, automatically on narrow windows, where it opens as an overlay. The minimum window width drops from 1000 to 720 px.
-- When collapsed, setup problems and background tasks each get one icon that links to the right settings page or task.
-
-[Download v0.5.5](https://github.com/tancheng33/tingo/releases/tag/v0.5.5). In-app updates are available from v0.5.2 onward.
-
-## v0.5.4 · Live transcription and recording workspace
-
-- Follow live transcripts with provisional speaker labels, scroll back through the meeting, and mark key moments.
-- Automatic gain helps the recognizer pick up quiet speech.
-- Settings keep the menu in place while model discovery runs in the background.
-
-[Download v0.5.4](https://github.com/tancheng33/tingo/releases/tag/v0.5.4). In-app updates are available from v0.5.2 onward.
-
-## v0.5.3: flowing background and update fallback
-
-- The home gradient flows gently while the recording card stays still, respecting Reduce Motion.
-- The legacy update checker falls back to release assets when the GitHub API is unavailable or rate-limited, retaining installer checksum verification.
-
-[Download v0.5.3](https://github.com/tancheng33/tingo/releases/tag/v0.5.3). Users on v0.5.2 can update in-app; earlier versions require a manual installation.
-
-## v0.5.2: in-app updates
-
-- Download and verify an update, then click **Restart and update** to replace and reopen the app automatically. Meetings, settings and speech models are kept.
-- See download and verification progress, and install later if preferred. Installation waits until recording and other active tasks are finished.
-- Manual update checks now bypass stale backend results.
-- Developer ID-signed and Apple-notarized apps; update packages also carry a signature bound to the release version.
-
-[Download v0.5.2](https://github.com/tancheng33/tingo/releases/tag/v0.5.2). Users of v0.5.1 and earlier must install this update manually once; later releases can be installed from within v0.5.2. For Apple silicon Macs.
+[Download the latest release](https://github.com/tancheng33/tingo/releases/latest) · see [Releases](https://github.com/tancheng33/tingo/releases) for what changed in each version.
 
 ## Highlights
 
@@ -89,15 +52,15 @@ Looking for a **free, open-source, local alternative to Otter.ai, Granola, Firef
 
 **Stay organized.** Tag meetings by project or type and filter the list by tag; archive finished ones (they stay searchable). Select several meetings to tag, archive or delete them at once, and rename any meeting. Deleting meetings and recordings moves them to the Trash, so nothing is lost by accident. On desktop, **Settings → Storage** also lets you choose a meeting folder without restarting. By default, recordings, transcripts, minutes and history are copied to a new empty folder and verified, with progress shown and originals kept. You can also switch without copying and switch back to view the old library. Finish active tasks before switching; speech models stay in place. Settings → Storage shows what takes space and can drop old recordings (optionally archived ones only) while keeping transcripts and minutes.
 
-**Swappable ASR models.** Paraformer-large (default, fast and accurate for Chinese), SenseVoice (mixed Chinese / English / Japanese / Korean / Cantonese) or Fun-ASR-Nano (most accurate, applies your hotwords during recognition) — downloaded and switched in Settings, all running locally.
+**Swappable ASR models.** Paraformer-large (default, fast and accurate for Chinese), SenseVoice (mixed Chinese / English / Japanese / Korean / Cantonese) or Fun-ASR-Nano (most accurate, applies your hotwords during recognition) — downloaded and switched in Settings, all running locally. On macOS 26+ you can also pick **Apple Speech**, the system's on-device recognizer: set the meeting language to Chinese or English, then **Check / install** the system language assets. Tingo's own speaker model still handles diarization.
 
 ## Install
 
 **Desktop app:** download `Tingo_x.y.z_aarch64.dmg` from [Releases](https://github.com/tancheng33/tingo/releases/latest) (Apple Silicon, macOS 13+; recording system audio needs macOS 15+). On first launch it downloads ~330 MB of models, then works offline.
 
-**Official releases from v0.5.0 are Developer ID-signed and Apple-notarized.** Open the DMG and drag Tingo into Applications. No manual signing, right-click workaround or `xattr` command is needed. Ad-hoc builds made from source are not notarized release packages.
+**Official releases are Developer ID-signed and Apple-notarized.** Open the DMG and drag Tingo into Applications — no right-click workaround or `xattr` command needed. Builds made from source are not notarized. The first recording asks for microphone and screen/system-audio permission.
 
-Quit the old app before replacing it; meetings, history and settings are preserved. Microphone and screen/system-audio permissions are still required. If recording permissions stop working after upgrading from an older ad-hoc build, grant them again in System Settings → Privacy & Security.
+New versions are announced next to the version number in the sidebar. Download, let the signature check pass, then choose **Restart and update**; meetings, history and settings are preserved. You can also replace the app with a newer DMG.
 
 **Command line** (Python + FunASR; needs Python 3.11+ and ffmpeg):
 
@@ -122,7 +85,7 @@ ScreenCaptureKit records system audio and mic → audio is chunked at pauses whi
 
 **Is my audio uploaded?** No. Transcription and speaker separation run on your Mac. Only the transcript text goes to the LLM you configure — use a local Ollama model and nothing leaves the machine.
 
-**Which LLMs are supported?** Any OpenAI-compatible API (OpenAI, Gemini, DeepSeek, Qwen, Ollama, …) and the Anthropic (Claude) API.
+**Which LLMs are supported?** Any OpenAI-compatible API (OpenAI, Gemini, DeepSeek, Qwen, Kimi, Ollama, …) and the Anthropic (Claude) API. Models that only accept a fixed temperature (such as Kimi) are handled automatically, and the temperature can be adjusted in Settings.
 
 **Does it work for English meetings?** Yes. Switch the speech model to SenseVoice and the app and minutes to English in Settings.
 
@@ -138,7 +101,3 @@ cd engine && cargo test                    # Rust core
 Official release signing and notarization are documented in [the macOS release guide](app/scripts/README.md). Regular source builds do not need a distribution certificate.
 
 Issues and PRs are welcome. Licensed under [MIT](LICENSE).
-
-### Apple system speech (macOS 26+)
-
-The desktop app offers **Apple Speech** in Settings → Speech model. Select Chinese or English explicitly, then **Check / install** to prepare system language assets and shared models, or **Use** when ready. Transcription runs on device; macOS manages the language assets. Tingo still uses its speaker model for diarization. Unsupported systems show an explanation and can use the existing engines. This option does not change LLM summarization.
