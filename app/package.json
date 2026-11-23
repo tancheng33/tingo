@@ -1,7 +1,7 @@
 {
   "name": "tingo-app",
   "private": true,
-  "version": "0.5.5",
+  "version": "0.5.6",
   "type": "module",
   "packageManager": "pnpm@11.18.0",
   "scripts": {

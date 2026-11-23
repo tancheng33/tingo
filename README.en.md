@@ -28,6 +28,13 @@ Looking for a **free, open-source, local alternative to Otter.ai, Granola, Firef
 
 > The meetings, names and numbers in the screenshots are fictional demo data.
 
+## v0.5.6 · Works with models that only accept a fixed temperature
+
+- Fixes the 400 "invalid temperature: only 1 is allowed" from Kimi's OpenAI-compatible API when generating minutes ([#2](https://github.com/tancheng33/tingo/issues/2)). When a model rejects the temperature, the request is sent again without it — no settings change needed.
+- Settings → LLM has a new optional Temperature field; leave it empty for the default 0.2.
+
+[Download v0.5.6](https://github.com/tancheng33/tingo/releases/tag/v0.5.6). In-app updates are available from v0.5.2 onward.
+
 ## v0.5.5 · Steadier live speakers, narrow windows
 
 - While you record, speakers are re-clustered across the whole meeting and earlier labels are corrected. In two three-person test meetings, live labels used to grow to 50–90+ speakers; they now settle on three, matching the final transcript.
