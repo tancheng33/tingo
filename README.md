@@ -1,272 +1,275 @@
 <p align="center"><img src="brand/tingo-icon.svg" width="120" alt="Tingo"></p>
 
-<h1 align="center">Tingo 听过</h1>
+<h1 align="center">Tingo</h1>
 
-<p align="center"><b>开过的会，都听过。</b><br>本地录音、本地转写的中文会议纪要工具，每条结论都对得上原话。</p>
+<p align="center"><b>Every meeting, heard.</b><br>Local-first AI meeting notes for Mac. Your audio stays on your machine, and every conclusion links back to what was actually said.</p>
 
 <p align="center">
-  <a href="https://github.com/tancheng33/tingo/releases/latest"><img src="https://img.shields.io/badge/%E4%B8%8B%E8%BD%BD-macOS%20App-1f4bff?logo=apple" alt="下载"></a>
+  <a href="https://github.com/tancheng33/tingo/releases/latest"><img src="https://img.shields.io/badge/download-macOS%20app-1f4bff?logo=apple" alt="Download"></a>
   <img src="https://img.shields.io/badge/macOS-13%2B-000?logo=apple" alt="macOS 13+">
   <img src="https://img.shields.io/badge/license-MIT-34c6f4" alt="MIT">
-  <a href="https://tancheng33.github.io/tingo/"><img src="https://img.shields.io/badge/%E4%B8%BB%E9%A1%B5-tancheng33.github.io%2Ftingo-555" alt="主页"></a>
-  <a href="README.en.md"><img src="https://img.shields.io/badge/README-English-555" alt="English"></a>
+  <a href="https://tancheng33.github.io/tingo/en.html"><img src="https://img.shields.io/badge/website-tancheng33.github.io%2Ftingo-555" alt="Website"></a>
+  <a href="README.zh-CN.md"><img src="https://img.shields.io/badge/README-%E4%B8%AD%E6%96%87-555" alt="中文"></a>
 </p>
 
-<p align="center"><img src="docs/screenshots/demo.gif" width="880" alt="演示：跨会议搜索、点回原话、鱼骨图展开引用、看着纪要一节一节写出来"></p>
+<p align="center"><img src="docs/screenshots/demo.gif" width="880" alt="Demo: search across meetings, jump to the original words, expand fishbone quotes, watch the minutes being written"></p>
 
-录下腾讯会议、飞书、Zoom 里的声音和你自己的麦克风，在你的电脑上转成文字、分清谁说了什么，再交给你自己选的大模型整理成纪要：议题、决议、带负责人和截止日期的待办、风险，讨论了"为什么"时还会画一张**每个分支都绑着原话的鱼骨图**。
+Tingo records the audio of Zoom, Teams, Google Meet, Tencent Meeting or Feishu calls together with your microphone, transcribes it **on your Mac**, tells the speakers apart, and has the LLM of your choice write structured minutes: topics, decisions, action items with owners and due dates, and risks. When the meeting discussed *why* something happened, it also draws a **fishbone diagram whose every branch is bound to the original quotes**.
 
-- **录音不出本机**：识别、区分说话人都在本地完成，不上传录音。纪要可以用 DeepSeek、通义千问这类接口，也可以用本地 Ollama，全程断网。
-- **为中文会议做的**：阿里达摩院 FunASR 的中文识别模型，中文标点、数字、人名都比通用的英文方案好；时间说法（"下周三""月底"）按会议日期换算成具体日子。
-- **结论有出处**：纪要里每一条都带时间戳，点一下跳回录音那一秒；鱼骨图会统计每个分支引用了多少原文，一句都对不上的直接标出来，一眼看出谁在说空话。
-- **中英双语**：界面、纪要、导出都支持中文和英文；英文会议用 SenseVoice 识别，中文会议也能直接出英文纪要。
-- **桌面安装包约 13 MB**：Tauri + Rust，不用装 Python 和 ffmpeg。1 小时的会议结束后几秒出转写，76 分钟的录音导入后约 3.5 分钟转完。
+- **Audio never leaves your Mac.** Speech recognition and speaker diarization run locally; nothing is uploaded. Minutes can be written by OpenAI, Claude, Gemini, DeepSeek, Qwen, Kimi or any OpenAI-compatible API, or by a local Ollama model, fully offline.
+- **Multilingual.** English, Chinese, Japanese, Korean and Cantonese are recognized with SenseVoice, even when they're mixed in one meeting. For Chinese meetings, FunASR's Paraformer handles punctuation, numbers and names far better than English-first stacks. Relative dates ("next Wednesday", "end of month") are resolved against the meeting date.
+- **Every claim has a source.** Each line of the minutes carries a timestamp that jumps to that second of the recording. The fishbone diagram counts how much original speech backs each branch and flags the ones with **no evidence**, so hand-waving is visible at a glance.
+- **English and Chinese interface.** The app, the minutes and every export work in both languages, and the minutes can be written in a different language from the meeting.
+- **About 13 MB to download.** Tauri + Rust, no Python or ffmpeg needed. A live recording is fully transcribed seconds after you hit stop; a 76-minute file imports in about 3.5 minutes on an M1 Pro.
 
-如果你在找 **Otter.ai、Granola、Fireflies、飞书妙记、通义听悟、讯飞听见** 的本地、开源、免费替代，或者想要一个**不上传录音的 AI 会议记录工具**，Tingo 就是为这个做的。
+Looking for a **free, open-source, local alternative to Otter.ai, Granola, Fireflies.ai or Fathom**, an AI meeting note taker that never uploads your audio? That's what Tingo is for.
 
-> 截图里的会议、人名和数据都是虚构的演示内容。
+*Tingo* comes from 听 (*tīng*, "to listen"); its Chinese name 听过 means "heard it".
 
-[下载最新版](https://github.com/tancheng33/tingo/releases/latest) · 每个版本改了什么见 [Releases](https://github.com/tancheng33/tingo/releases)。
+> The meetings, names and numbers in the screenshots are fictional demo data.
 
-## 功能
+[Download the latest release](https://github.com/tancheng33/tingo/releases/latest) · see [Releases](https://github.com/tancheng33/tingo/releases) for what changed in each version.
 
-### 原因分析鱼骨图：一眼看出哪条是空话
+## Features
 
-会上讨论了"为什么"——转化率为什么掉了、项目为什么延期——纪要里就会多一张鱼骨图。每个分支都绑着它依据的原话，点开能看到是谁在几分几秒说的，点时间戳跳回去听。
+### Evidence-bound fishbone diagrams
 
-每个分支会统计引用了几段、多少字的原文：大模型给的时间戳在转写里对不上的，标成**无原文依据**（红色）；引用太少的标成**依据很少**（橙色）。会上有人凭感觉下的结论，在图上一眼就能看出来。
+When a meeting analyzes causes (why conversion dropped, why a project slipped), the minutes include a fishbone diagram. Every branch is bound to the quotes it's based on: expand it to see who said what and when, and click a timestamp to listen.
 
-<p align="center"><img src="docs/screenshots/fishbone.png" width="820" alt="鱼骨图：每个分支绑着原话"></p>
+Each branch counts how many passages and how much original speech it cites. Branches whose cited timestamps can't be found in the transcript are marked **no evidence** (red); thinly supported ones are marked amber. Conclusions someone reached on gut feeling stand out immediately.
 
-鱼骨图可以一键导出成 [Excalidraw](https://excalidraw.com) 画板，接着改、拿去汇报：
+<p align="center"><img src="docs/screenshots/fishbone.png" width="820" alt="Fishbone diagram bound to quotes"></p>
 
-<p align="center"><img src="docs/screenshots/excalidraw.png" width="720" alt="导出到 Excalidraw 的鱼骨图"></p>
+Export the fishbone to [Excalidraw](https://excalidraw.com) with one click to keep editing or present it:
 
-### 不用等：录完就能开下一场
+<p align="center"><img src="docs/screenshots/excalidraw.png" width="720" alt="Fishbone exported to Excalidraw"></p>
 
-结束录音后，转写和纪要在后台进行，首页马上可以开下一场会。侧边栏能看到每个任务进行到哪一步；点进会议，能看着大模型一节一节写纪要——推理模型动笔前要先想一两分钟，这时也会显示"已思考多少字"，不会像卡住了一样。
+### Never wait: start the next meeting right away
 
-<p align="center"><img src="docs/screenshots/home.png" width="49%" alt="首页：后台任务"> <img src="docs/screenshots/generating.png" width="49%" alt="纪要生成过程"></p>
+After you stop recording, transcription and minutes run in the background and the home page is ready for the next meeting. The sidebar shows where each task is; open a meeting to watch the LLM write the minutes section by section. Reasoning models think for a minute or two before writing, so Tingo shows how much they've thought instead of looking stuck.
 
-### 搜得到会上说过的每一句话
+<p align="center"><img src="docs/screenshots/home.png" width="49%" alt="Home: background tasks"> <img src="docs/screenshots/generating.png" width="49%" alt="Minutes being written"></p>
 
-在会议列表里搜关键词，会把所有会议的转写都翻一遍，列出命中的原话，点一句就跳到那场会的那一秒。纪要末尾有一张「人名与术语」表，记下正确写法和识别错的写法（比如"历史工单"被听成"历史中单"），搜索时会连错的写法一起搜出来；一键就能把它们加进热词。
+### Search everything that was said
 
-### 谁说了什么
+Search the meeting list and Tingo looks through every transcript, lists the matching sentences, and jumps to that second of that meeting. The minutes end with a **names & terms** table recording the correct spelling and how the recognizer misheard it, so searching finds the misheard variants too. Add them all to your hotwords in one click.
 
-边录边转：录音时就在识别，结束后几秒出完整转写。按声纹区分说话人；不想一个个改名，可以让 AI 根据"王总你看呢"这类称呼和自我介绍猜出谁是谁，每个名字都附上依据。猜名时显示状态和实时耗时；保留已填写的名字，确认后保存，也可选择保存并重新生成纪要。
+### Who said what
 
-忘了点结束也没关系：会议软件退出、或者连续 10 分钟没人说话（可以调），录音会自动结束并截掉末尾的空白。点任意一句跳到那里回听，播放时当前发言会高亮。
+Transcription happens while you record, so the full transcript is ready seconds after you stop. Speakers are separated by voice. Instead of renaming them one by one, let the AI guess who's who from how people address each other and introduce themselves; every guess comes with its evidence. Names you've already entered are kept, and you can save and regenerate the minutes in one step.
 
-<p align="center"><img src="docs/screenshots/transcript.png" width="820" alt="转写：区分说话人"></p>
+Forgot to stop? Recording ends by itself when the meeting app quits or after 10 minutes of silence (adjustable), and the silent tail is trimmed. Click any sentence to play from there; the current sentence is highlighted during playback.
 
-### 导出与分享
+<p align="center"><img src="docs/screenshots/transcript.png" width="820" alt="Transcript with speakers"></p>
 
-- **PDF**：A4 排版，保留鱼骨图的问题、分支和说明，适合直接分享。
-- **Word**：可以接着改的 .docx，发给领导最常用的格式。
-- **SRT 字幕**：带说话人的逐句字幕，可以配进会议录屏。
-- **Obsidian**：一场会一篇笔记，日期、时长、参会人写在属性里，鱼骨图存成 Excalidraw 画板嵌在笔记里；可以设成生成纪要后自动存。
-- **飞书 / 钉钉 / 企业微信**：贴一个群机器人的 webhook，一键推送到群里。
-- **Markdown**：复制粘贴到任何地方。
+### Export and share
 
-导出的鱼骨图不附带引用原话、引用统计和引用时间戳；PDF、Word 也不附带「人名与术语」。这些信息仍保留在应用内，方便核对和搜索。
+- **PDF**: A4 layout that keeps the fishbone's problem, branches and notes, ready to send.
+- **Word**: an editable .docx.
+- **SRT subtitles**: sentence by sentence with speakers, for meeting recordings.
+- **Obsidian**: one note per meeting with date, duration and participants as properties; fishbones are embedded as Excalidraw drawings. Can be saved automatically after the minutes are written.
+- **Feishu / DingTalk / WeCom group bots**: paste a webhook and share to the group in one click.
+- **Markdown**: copy and paste anywhere.
 
-<p align="center"><img src="docs/screenshots/pdf.png" width="820" alt="导出 PDF（旧版排版示意，当前导出已精简引用和术语）"></p>
+Exported fishbones leave out the quotes, citation counts and timestamps, and PDF and Word leave out the names & terms table. They stay in the app for checking and search.
 
-### 纪要历史版本
+<p align="center"><img src="docs/screenshots/pdf.png" width="820" alt="PDF export layout preview; current exports omit evidence details and terms"></p>
 
-重新生成成功或编辑保存时，旧纪要会自动保留。点击「历史版本」，在左侧选择保存时间，右侧查看内容；生成失败不会覆盖原来的纪要。
+### Minutes history
 
-历史版本也支持 PDF、Word、存到 Obsidian、复制 Markdown 和推送到群。导出文件带版本标识，不会覆盖当前版；SRT 使用整场会议的转写，不随纪要版本变化。可单独删除不需要的旧版，确认删除后无法恢复，不影响当前纪要。
+Regenerating or editing the minutes keeps the previous version, and a failed generation never overwrites the current one. Open **History** to browse versions by time and preview, export, copy or share any of them. Historical exports get their own filenames; SRT always uses the meeting transcript. Deleting a historical version is permanent and leaves the current minutes unchanged.
 
-历史从启用此功能后开始保留，无法找回此前已覆盖的内容。
+### Stay organized
 
-### 会议多了也好管
+- **Tags and archive**: tag meetings by project or type and filter by tag; archive finished ones (they stay searchable).
+- **Bulk actions**: select several meetings to tag, archive or delete them at once.
+- **Rename** any meeting without touching its folder.
+- **Undoable deletes**: deleting a meeting or only its recording moves it to the Trash.
+- **Storage**: see what takes space and remove recordings older than N days (optionally only archived ones) while keeping transcripts and minutes.
 
-- **标签和归档**：按项目、会议类型打标签，会议列表按标签筛选；开完的会归档收起，搜索时照样能找到。
-- **批量操作**：在会议列表里多选，一次加标签、归档或删除。
-- **改标题**：随手改成好记的名字，不影响会议文件夹。
-- **删除可恢复**：删除会议、只删录音都是移到废纸篓，后悔了还能拿回来。
-- **管理空间**：设置里能看到录音占了多少、哪几场会最占地方；可以一键删掉 N 天前（或只删已归档）会议的录音，转写和纪要都保留。
+### Swappable speech models
 
-### 识别模型可以换
+Pick the recognizer that fits your meetings in Settings; all of them run locally:
 
-默认的 Paraformer-large 适合大多数中文会议。会上中英文混着说，可以换成 SenseVoice；要更准、想让人名和项目代号在识别时就认对，可以换成 Fun-ASR-Nano（会直接用上你填的热词）。在设置里下载、切换，都在本地运行。
+| Model | Best for |
+|---|---|
+| **SenseVoice** | English, Japanese, Korean, Cantonese, and meetings that mix languages. The default when the app is in English |
+| **Paraformer-large** | Chinese meetings: fast, accurate and light on memory. The default when the app is in Chinese |
+| **Fun-ASR-Nano** | The most accurate Chinese recognition, and it applies your hotwords (names, project code names) while recognizing; about 1/4 the speed, about 2 GB of memory |
+| **Apple Speech** | macOS 26+: the system's on-device recognizer for English or Chinese, with language assets managed by macOS |
 
-macOS 26 及以上还可以选 **Apple Speech**，用系统自带的语音识别：先把会议语言设成「中文」或「英文」，再点「检查／安装」准备系统语言模型。模型由 macOS 下载和管理，音频同样在本机识别；说话人区分仍由 Tingo 的声纹模型完成。系统不支持时会说明原因，随时可以切回原来的引擎。
+Speaker separation always uses Tingo's own voice model, whichever recognizer you pick.
 
-<p align="center"><img src="docs/screenshots/settings.png" width="820" alt="设置：识别模型"></p>
+<p align="center"><img src="docs/screenshots/settings.png" width="820" alt="Settings: speech models"></p>
 
-## 安装
+## Install
 
-### 桌面 App（推荐）
+### Desktop app (recommended)
 
-到 [Releases](https://github.com/tancheng33/tingo/releases/latest) 下载 `Tingo_x.y.z_aarch64.dmg`，拖进「应用程序」。目前只有 Apple 芯片（M1 及以后）的版本，需要 macOS 13 以上；录系统声音需要 macOS 15 以上。
+Download `Tingo_x.y.z_aarch64.dmg` from [Releases](https://github.com/tancheng33/tingo/releases/latest) and drag it into Applications. It runs on Apple silicon Macs (M1 and later) with macOS 13+; recording system audio needs macOS 15+.
 
-第一次打开会有一个新手引导：下载识别模型、试录 3 秒确认权限、接上大模型，再看一场内置的示例会议。识别模型（约 330 MB：识别模型来自 ModelScope，国内直连；标点和声纹模型来自 GitHub，网络中断会自动续传），之后完全离线可用。
+A short tour on first launch downloads the speech model, test-records 3 seconds to check permissions, connects an LLM and shows a built-in sample meeting. The speech models are a one-time download of a few hundred MB (from GitHub and ModelScope, resumable); after that, recognition works fully offline.
 
-官方安装包经过 Developer ID 签名和苹果公证，打开就能用，不用右键绕过提示或运行 `xattr`。请从 GitHub Releases 下载；自己从源码构建的版本没有公证。
+Official releases are Developer ID-signed and Apple-notarized: open the DMG and drag Tingo into Applications, with no right-click workaround or `xattr` command. Builds made from source are not notarized.
 
-第一次录音时，macOS 会请求「麦克风」和「屏幕与系统录音」权限（录对方的声音要用到后者），允许即可。
+The first recording asks for **Microphone** and **Screen & System Audio Recording** permission (the latter captures the other side of the call).
 
-有新版本时，侧边栏的版本号旁边会亮起提示（侧边栏收起时显示在「设置」图标上）。点击下载，签名校验通过后选「重启并更新」，会议、历史版本和配置都保留。也可以下载新的 DMG 拖进「应用程序」替换。
+New versions are announced next to the version number in the sidebar. Download, let the signature check pass, then choose **Restart and update**; meetings, history and settings are preserved. You can also replace the app with a newer DMG.
 
-### 命令行
+### Command line
 
-命令行版基于 Python（FunASR），适合放进脚本、批量处理录音。需要 Python 3.11+ 和 ffmpeg：
+The command-line version is built on Python (FunASR) and suits scripts and batch processing. It needs Python 3.11+ and ffmpeg:
 
 ```bash
 brew install ffmpeg
-uv tool install git+https://github.com/tancheng33/tingo      # 或 pipx install git+…
-tingo doctor                                                 # 检查环境
+uv tool install git+https://github.com/tancheng33/tingo      # or pipx install git+…
+tingo doctor                                                 # check the environment
 ```
 
 ```bash
-tingo record -t 周会 -w "林舟,注册转化"     # 录音（系统声音 + 麦克风），Ctrl+C 结束，自动出纪要
-tingo run ~/Downloads/项目评审.mp4          # 处理已有的录音或录屏
-tingo summarize ~/Documents/Tingo/2026-10-28_1400_复盘 -s "林舟,陈默"   # 改说话人名字后重新生成纪要
-tingo push ~/Documents/Tingo/2026-10-28_1400_复盘                       # 推送到群
-tingo ui                                                     # 打开图形界面
+tingo record -t standup -w "Lin Zhou,signup funnel"   # record system audio + mic, Ctrl+C to stop, minutes follow
+tingo run ~/Downloads/design-review.mp4                # process an existing recording or screen capture
+tingo summarize ~/Documents/Tingo/2026-10-28_1400_retro -s "Lin Zhou,Chen Mo"   # regenerate after renaming speakers
+tingo push ~/Documents/Tingo/2026-10-28_1400_retro     # share to a group chat
+tingo ui                                               # open the GUI
 ```
 
-每场会议一个文件夹，默认在 `~/Documents/Tingo/`，桌面 App 和命令行共用。桌面版可在 **设置 → 存储** 选择其他目录，保存后立即生效，无需重启。默认将录音、转写、纪要及历史版本复制到新的空文件夹，显示进度并校验文件，原目录保留；也可以只切换目录，之后切回查看旧会议。正在录音或处理会议时不能切换。识别模型的位置不变。
-
-目录结构：
+Each meeting is a folder, by default under `~/Documents/Tingo/`, shared by the app and the command line. In the app, **Settings → Storage** moves the library to another folder without restarting: by default recordings, transcripts, minutes and history are copied to a new empty folder and verified, and the original stays in place. You can also just switch folders and switch back later. Speech models stay where they are.
 
 ```
-2026-10-28_1400_注册转化复盘/
-├── 录音.m4a          # 16 kHz 单声道，1 小时约 30 MB
-├── 转写.md
-├── transcript.json   # 结构化转写
-└── 纪要.md
+2026-10-28_1400_signup-funnel-retro/
+├── 录音.m4a          # recording, 16 kHz mono, about 30 MB per hour
+├── 转写.md           # transcript
+├── transcript.json   # structured transcript
+└── 纪要.md           # minutes
 ```
 
-## 配置大模型
+## Connect an LLM
 
-转写不需要大模型，生成纪要需要。任何 OpenAI 兼容接口都可以，在设置里点选，带连接测试：
+Transcription doesn't need an LLM; the minutes do. Pick one in Settings and test the connection:
 
-| 选择 | 说明 |
+| Choice | Notes |
 |---|---|
-| DeepSeek、通义千问（百炼） | 填 API Key 即可。实测 76 分钟的会，DeepSeek V4 Flash 约 50 秒出纪要 |
-| 本机中转（Magpie、CC Switch） | 打开后自动探测，一键选用，模型从列表里挑 |
-| 本地 Ollama | 全程不出本机，不需要 Key。本地模型上下文较短，长会议会自动分段提炼再合并 |
-| 自定义 | 任意 OpenAI 兼容地址，或 Anthropic（Claude）接口 |
+| OpenAI, Claude, Gemini, DeepSeek, Qwen (Bailian) | Paste an API key. On a 76-minute meeting, DeepSeek V4 Flash writes the minutes in about 50 seconds |
+| Local relays (Magpie, CC Switch) | Detected automatically when running; pick a model from the list |
+| Local Ollama | Nothing leaves your Mac and no key is needed. Local models have shorter contexts, so long meetings are summarized in parts and merged |
+| Custom | Any OpenAI-compatible URL, or an Anthropic (Claude) API |
 
-有的模型只接受固定的温度（比如 Kimi 只认 1），Tingo 会自动处理；也可以在设置里调「温度」。
+Some models only accept a fixed temperature (Kimi only accepts 1, for example). Tingo handles that automatically, and the temperature can be adjusted in Settings.
 
-配置文件在 `~/.config/tingo/config.toml`，也可以用环境变量 `TINGO_LLM_BASE_URL`、`TINGO_LLM_API_KEY`、`TINGO_LLM_MODEL`。
+The config file is `~/.config/tingo/config.toml`; the environment variables `TINGO_LLM_BASE_URL`, `TINGO_LLM_API_KEY` and `TINGO_LLM_MODEL` work too.
 
-## 隐私
+## Privacy
 
-- 录音和转写只在你的电脑上，识别模型在本地运行。
-- 生成纪要时，**转写文字**会发给你配置的大模型接口；用本地 Ollama 的话这一步也不出本机。
-- 推送到群、存到 Obsidian、导出 PDF 都是你点了才发生。
-- App 内的服务只监听 127.0.0.1，不对外开放。没有任何统计和上报。
+- Recordings and transcripts stay on your Mac, and the speech models run locally.
+- When generating minutes, the **transcript text** is sent to the LLM endpoint you configured. With local Ollama, that step stays on your Mac too.
+- Sharing to a group chat, saving to Obsidian and exporting PDFs only happen when you click.
+- The app's built-in server listens on 127.0.0.1 only. No analytics, no telemetry.
 
-## 工作原理
+## How it works
 
 ```
-录音 ─┬─ 系统声音（ScreenCaptureKit）─┐
-      └─ 麦克风 ──────────────────────┴─ 16 kHz 单声道，边录边按停顿切段
-                                              │
-          VAD 切分 → 识别（Paraformer / SenseVoice / Fun-ASR-Nano）→ 标点 → CAM++ 声纹
-                                              │
-                    谱聚类区分说话人（全场一次，说话人编号前后一致）
-                                              │
-          大模型写纪要（长会议分段提炼再合并；日期按会议日换算；术语表纠正同音字）
-                                              │
-               鱼骨图的每个引用对照转写核实 → 纪要.md → PDF / Obsidian / 群
+Recording ─┬─ system audio (ScreenCaptureKit) ─┐
+           └─ microphone ──────────────────────┴─ 16 kHz mono, chunked at pauses while recording
+                                                    │
+         VAD → speech recognition (SenseVoice / Paraformer / Fun-ASR-Nano / Apple Speech) → punctuation → CAM++ voiceprints
+                                                    │
+                 spectral clustering separates speakers (once per meeting, so labels stay consistent)
+                                                    │
+     LLM writes the minutes (long meetings in parts, then merged; dates resolved; a glossary fixes homophones)
+                                                    │
+          every fishbone citation is checked against the transcript → minutes → PDF / Obsidian / group chat
 ```
 
-几个细节：
+A few details:
 
-- **桌面版**：Tauri 外壳 + Rust 核心库，sherpa-onnx 运行 FunASR 官方 Paraformer-large int8 模型，声纹聚类从 Python 版移植，与之逐秒对比 93.6% 一致。选型过程（比较了 8 套识别引擎）见 [`spike/sherpa/RESULTS.md`](spike/sherpa/RESULTS.md)。
-- **外放回声**：开着扬声器开会时，麦克风会把对方的声音再录一遍。Tingo 在系统声音有人说话时压低麦克风，只在对方安静时用麦克风；双方同时说话时本地一侧会被盖掉，**戴耳机效果最好**。
-- **元信息不交给模型**：纪要里的日期、时长、参会人由程序填写，模型只写内容，避免编造。
-- **推理模型**：DeepSeek-R1、Qwen3 等的思考过程会被过滤，不进纪要。
+- **Desktop app**: a Tauri shell around a Rust core. [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) runs the FunASR models locally; speaker clustering was ported from the Python version and matches it on 93.6% of seconds. Notes on choosing between 8 recognition engines: [`spike/sherpa/RESULTS.md`](spike/sherpa/RESULTS.md) (in Chinese).
+- **Speaker echo**: with speakers instead of headphones, the microphone picks up the other side again. Tingo ducks the microphone while the system audio has speech and uses it when the other side is quiet; when both talk at once, the local side is drowned out. **Headphones work best.**
+- **Metadata isn't left to the model**: the date, duration and participants in the minutes are filled in by the program; the model only writes the content, so it can't make them up.
+- **Reasoning models**: the thinking of DeepSeek-R1, Qwen3 and similar models is filtered out of the minutes.
 
-## 和其他工具比
+## Compared with other tools
 
-| | Tingo | 飞书妙记 / 通义听悟等云服务 | Meetily 等开源会议助手 |
+| | Tingo | Cloud services (Otter, Fireflies, Feishu Minutes…) | Open-source assistants (Meetily…) |
 |---|---|---|---|
-| 录音存放 | 只在本机 | 上传到云端 | 本机 |
-| 中文识别 | FunASR（中文专用） | 好 | 以 Whisper / Parakeet 为主，面向英文 |
-| 录线上会议 | 直接录系统声音，不用装虚拟声卡 | 主要服务自家会议平台 | 支持 |
-| 纪要用的模型 | 自己选，可以完全本地 | 平台指定 | 自己选 |
-| 结论能否追溯原话 | 每条带时间戳，鱼骨图核实引用 | 部分支持 | — |
-| 费用 | 免费开源 | 按时长或会员收费 | 免费开源 |
+| Where recordings live | Only on your Mac | Uploaded to the cloud | On your machine |
+| Chinese recognition | FunASR, built for Chinese | Varies | Mostly Whisper / Parakeet, English-first |
+| Recording online meetings | Captures system audio directly, no virtual audio device | Usually a bot that joins the call, or their own platform | Supported |
+| LLM for the minutes | Your choice, can be fully local | Chosen by the platform | Your choice |
+| Tracing conclusions to quotes | Every line timestamped; fishbone citations verified | Partial | — |
+| Price | Free and open source | Subscription or per-minute | Free and open source |
 
-## 常见问题
+## FAQ
 
-**怎么把腾讯会议、飞书、Zoom 的会议录下来并转成文字？**
-打开 Tingo 点录音，它会同时录下系统声音（对方的声音）和你的麦克风，不用装 BlackHole 之类的虚拟声卡。会议软件自己导出的录音、录屏（m4a、mp4、mp3、wav 等）也可以直接拖进窗口。
+**How do I record and transcribe a Zoom / Teams / Google Meet call on a Mac?**
+Hit record in Tingo. It captures the system audio (the other side) and your microphone at the same time; no BlackHole or other virtual audio device needed. You can also drop in recordings exported by the meeting app (m4a, mp4, mp3, wav, …).
 
-**会议录音会上传吗？**
-不会。语音识别、区分说话人都在你的 Mac 上完成。生成纪要时只把转写文字发给你选的大模型；用本地 Ollama 的话这一步也不出本机，可以断网使用。
+**Is my audio uploaded?**
+No. Speech recognition and speaker separation run on your Mac. Only the transcript text goes to the LLM you choose; with local Ollama, nothing leaves the machine and it works offline.
 
-**能自动生成会议纪要和待办吗？**
-能。纪要按一句话总结、议题、决议、待办（负责人、截止时间）、风险整理，每条带时间戳，点一下跳回录音原话。"下周三"这类说法会换算成具体日期。
+**Does it write minutes and action items automatically?**
+Yes: a one-line summary, topics, decisions, action items (owner, due date) and risks, each with a timestamp that plays the original words. Phrases like "next Wednesday" become actual dates.
 
-**支持哪些大模型？**
-任何 OpenAI 兼容接口（DeepSeek、通义千问、OpenAI、Gemini、Kimi、智谱、本地 Ollama 等）和 Anthropic（Claude）接口。
+**Which LLMs are supported?**
+Any OpenAI-compatible API (OpenAI, Gemini, DeepSeek, Qwen, Kimi, Zhipu, local Ollama, …) and the Anthropic (Claude) API.
 
-**能区分不同的人说的话吗？**
-能，按声纹自动区分说话人，改个名字纪要会按新名字重新生成。
+**Can it tell different speakers apart?**
+Yes, by voice. Rename a speaker and the minutes are regenerated with the new names.
 
-**英文会议能用吗？**
-能。界面和纪要都支持英文，英文会议在设置里把识别模型换成 SenseVoice；中文会议也可以直接出英文纪要。
+**Which languages does it understand?**
+With SenseVoice: English, Chinese, Japanese, Korean and Cantonese, including mixed-language meetings. The app interface is in English or Chinese, and the minutes can be written in English or Chinese regardless of the meeting's language.
 
-**Windows 能用吗？**
-桌面 App 目前只有 macOS（Apple 芯片）版。命令行版可以在 Linux 上用麦克风录音，Windows 可以先用会议软件录制再导入。
+**Does it run on Windows or Linux?**
+The desktop app is macOS-only (Apple silicon) for now. The command-line version records the microphone on Linux; on Windows, record with the meeting app and import the file.
 
-## 已知限制
+## Known limitations
 
-- 桌面 App 目前只有 Apple 芯片的 macOS 版；录系统声音需要 macOS 15+。命令行版在 Linux 上只能录麦克风，Windows 请先用会议软件录制再导入。
-- 多人抢话、声音相近时说话人可能分错，可以在详情页改名后重新生成纪要。
-- 外放时的回声处理是"让路"而不是真正的回声消除，换人处偶尔有一两个字识别错。
+- The desktop app is macOS-only (Apple silicon); recording system audio needs macOS 15+. The command line records only the microphone on Linux.
+- When people talk over each other or have similar voices, speakers may be mixed up; rename them on the meeting page and regenerate the minutes.
+- With speakers, echo handling ducks the microphone rather than truly cancelling echo, so a word or two may be misrecognized at speaker changes.
 
-## 路线图
+## Roadmap
 
-- [ ] 真正的回声消除（AEC），外放也能达到耳机的效果
-- [ ] 菜单栏快捷录音，会议软件启动时提醒
-- [ ] Windows 版（WASAPI 录系统声音）
-- [ ] 导出到飞书文档 / 钉钉文档
+- [ ] Real acoustic echo cancellation (AEC), so speakers work as well as headphones
+- [ ] Quick recording from the menu bar, with a reminder when a meeting app starts
+- [ ] Windows version (WASAPI system audio)
+- [ ] Export to Feishu Docs / DingTalk Docs
 
-## 参与开发
+## Development
 
 ```bash
 git clone https://github.com/tancheng33/tingo && cd tingo
 
-# 命令行 / Python 后端
+# Command line / Python backend
 uv sync
-uv run pytest -m "not slow"          # 不下载模型的单元测试
+uv run pytest -m "not slow"          # unit tests that don't download models
 
-# 界面（TypeScript + Vite），构建产物输出到 src/tingo/web，桌面版和 `tingo ui` 共用
+# Interface (TypeScript + Vite), built into src/tingo/web and shared by the desktop app and `tingo ui`
 cd app && pnpm install
-pnpm dev                             # 浏览器打开 http://localhost:1420，接口转给 8765 端口的后端
+pnpm dev                             # http://localhost:1420, API proxied to the backend on port 8765
 
-# 桌面版（Tauri + Rust）
-pnpm tauri dev                       # 开发窗口
-pnpm tauri build                     # 打包 .app / .dmg
-cd engine && cargo test              # Rust 核心库测试
-cargo run --release --example serve -- <模型目录> <录音组件> 8765   # 只起后端，配合 pnpm dev
+# Desktop app (Tauri + Rust)
+pnpm tauri dev                       # development window
+pnpm tauri build                     # build .app / .dmg
+cd engine && cargo test              # Rust core tests
+cargo run --release --example serve -- <models dir> <recorder> 8765   # backend only, for pnpm dev
 ```
 
-官方发布使用 `cd app && npm run release:mac`，之后提交公证并附加票据。完整步骤见 [macOS 正式发布流程](app/scripts/README.md)；普通源码构建无需发布证书。
+Official releases are built with `cd app && npm run release:mac`, then notarized and stapled; see [the macOS release guide](app/scripts/README.md). Regular source builds don't need a distribution certificate.
 
-欢迎提 Issue 和 PR。
+Issues and pull requests are welcome, in English or Chinese.
 
-## 致谢
+## Acknowledgements
 
-- [FunASR](https://github.com/modelscope/FunASR)：语音识别、VAD、标点、说话人模型
-- [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)：桌面版的本地推理
-- [Tauri](https://tauri.app)、[Excalidraw](https://excalidraw.com)
-- [Meetily](https://github.com/Zackriya-Solutions/meetily)、[Hyprnote](https://github.com/fastrepl/anarlog)：本地会议助手的思路
+- [FunASR](https://github.com/modelscope/FunASR): speech recognition, VAD, punctuation and speaker models
+- [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx): local inference in the desktop app
+- [Tauri](https://tauri.app), [Excalidraw](https://excalidraw.com)
+- [Meetily](https://github.com/Zackriya-Solutions/meetily), [Hyprnote](https://github.com/fastrepl/anarlog): ideas for local meeting assistants
 
-## 改名说明
+## Former name
 
-项目早期叫 jiyao（纪要）。改名后旧的命令 `jiyao`、环境变量 `JIYAO_*`、配置目录 `~/.config/jiyao/`、会议目录 `~/Documents/jiyao/` 都继续可用，不用搬数据。
+The project was first called jiyao (纪要, "minutes"). The old `jiyao` command, `JIYAO_*` environment variables, `~/.config/jiyao/` config folder and `~/Documents/jiyao/` meeting folder all keep working; no data needs to move.
 
-## 许可
+## License
 
 [MIT](LICENSE)

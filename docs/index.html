@@ -10,6 +10,18 @@
 <link rel="alternate" hreflang="zh-CN" href="https://tancheng33.github.io/tingo/">
 <link rel="alternate" hreflang="en" href="https://tancheng33.github.io/tingo/en.html">
 <link rel="alternate" hreflang="x-default" href="https://tancheng33.github.io/tingo/en.html">
+<script>
+// 浏览器语言不是中文就去英文页；从英文页点「中文」（?lang=zh）进来的记住选择，不再跳走
+(function () {
+  try {
+    if (/[?&]lang=zh\b/.test(location.search)) { localStorage.setItem("tingo-site-lang", "zh"); return; }
+    if (localStorage.getItem("tingo-site-lang") === "zh") return;
+  } catch (e) {}
+  var langs = navigator.languages && navigator.languages.length ? navigator.languages : [navigator.language || ""];
+  for (var i = 0; i < langs.length; i++) if (/^zh/i.test(langs[i])) return;
+  location.replace("en.html" + location.hash);
+})();
+</script>
 <link rel="icon" href="assets/tingo-icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="assets/tingo-icon.png">
 <meta property="og:type" content="website">

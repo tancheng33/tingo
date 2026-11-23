@@ -1,9 +1,9 @@
 /* 新手引导：第一次打开时走一遍——认识 Tingo、下载识别模型、试录 3 秒确认权限、接上大模型、看示例会议。
    每一步都可以跳过；走完（或点"跳过引导"）后记在 localStorage，不再自动弹出，设置 → 运行环境里可以重新打开。 */
 
-import { api, type Job } from "../api";
+import { api, type Config, type Job } from "../api";
 import { $, $maybe, errorMessage, esc, ICON, main, toast } from "../dom";
-import { t } from "../i18n";
+import { lang, t } from "../i18n";
 import { poll } from "../poll";
 import { refreshEnv, refreshMeetings } from "../sidebar";
 import { isBusy, needsModels, S } from "../state";
@@ -84,6 +84,29 @@ function go(d: number): void {
   draw();
 }
 
+/** 下载多语种模型要多大：基础模型（标点、声纹、VAD）+ SenseVoice */
+let sizeMb = 0;
+async function multilingualSize(): Promise<number> {
+  try {
+    const r = await api<{ models: { id: string; size_mb: number }[] }>("/api/models");
+    const size = (id: string) => r.models.find((m) => m.id === id)?.size_mb ?? 0;
+    const base = (S.env?.models_size_mb ?? 0) - size("paraformer");
+    return base > 0 && size("sensevoice") ? base + size("sensevoice") : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** 非中文界面：会议语言设成自动识别，再下载 SenseVoice（连同基础模型，下完自动设为当前模型） */
+async function downloadMultilingual(): Promise<Job> {
+  const c = await api<Config>("/api/config");
+  await api("/api/config", {
+    method: "PUT",
+    json: { base_url: c.base_url, model: c.model, api_key: null, hotwords: c.hotwords, webhook: c.webhook, secret: null, asr_language: "auto" },
+  });
+  return api<Job>("/api/models/sensevoice/download", { method: "POST" });
+}
+
 const BODY: Record<Step, () => void> = {
   hello() {
     $("#wlBody").innerHTML = `
@@ -107,12 +130,21 @@ const BODY: Record<Step, () => void> = {
     }
     if (!needsModels()) {
       box.innerHTML = `<h2>${t("识别模型", "Speech model")}</h2><div class="wl-ok">✓ ${t(`已就绪：${env.asr_model ?? "Paraformer-large"}`, `Ready: ${env.asr_model ?? "Paraformer-large"}`)}</div>
-        <p class="hint">${t("在设置 → 识别模型里还可以换成 SenseVoice（多语种）或 Fun-ASR-Nano（更准）。", "You can switch to SenseVoice (multilingual) or Fun-ASR-Nano (most accurate) in Settings → Speech model.")}</p>`;
+        <p class="hint">${
+          env.asr_model === "SenseVoice"
+            ? t("在设置 → 识别模型里还可以换成 Paraformer-large（纯中文会议更准）或 Fun-ASR-Nano（最准）。", "For all-Chinese meetings you can switch to Paraformer-large or Fun-ASR-Nano (most accurate) in Settings → Speech model.")
+            : t("在设置 → 识别模型里还可以换成 SenseVoice（多语种）或 Fun-ASR-Nano（更准）。", "You can switch to SenseVoice (multilingual) or Fun-ASR-Nano (most accurate) in Settings → Speech model.")
+        }</p>`;
       return;
     }
+    // 默认的 Paraformer 只认中文。界面不是中文的人多半开英文（或日、韩语）会，改下多语种的 SenseVoice、会议语言自动识别
+    const multilingual = lang() !== "zh";
+    const intro = multilingual
+      ? `<p class="hint">One-time download${sizeMb ? ` (~${sizeMb} MB)` : ""}; recognition then works fully offline. Tingo will use <b>SenseVoice</b>, which recognizes English, Chinese, Japanese, Korean and Cantonese, even mixed in one meeting. For all-Chinese meetings you can switch to Paraformer-large in Settings → Speech model.</p>`
+      : `<p class="hint">只需下载一次（约 ${env.models_size_mb ?? 330} MB），之后识别全程离线。</p>`;
     box.innerHTML = `
       <h2>${t("下载识别模型", "Download the speech model")}</h2>
-      <p class="hint">${t(`只需下载一次（约 ${env.models_size_mb ?? 330} MB），之后识别全程离线。`, `One-time download (~${env.models_size_mb ?? 330} MB); recognition then works fully offline.`)}</p>
+      ${intro}
       ${
         dl
           ? `<div class="asr-prog" style="width:100%"><div class="asr-bar"><i id="wlBar"></i></div><small id="wlText">${esc(dl.stage || t("准备下载…", "Starting download…"))}</small></div>`
@@ -122,7 +154,7 @@ const BODY: Record<Step, () => void> = {
     if (b)
       b.onclick = async () => {
         try {
-          const job = await api<Job>("/api/models/download", { method: "POST" });
+          const job = multilingual ? await downloadMultilingual() : await api<Job>("/api/models/download", { method: "POST" });
           S.jobs = [...S.jobs, job];
           poll();
           BODY.model();
@@ -132,6 +164,7 @@ const BODY: Record<Step, () => void> = {
         }
       };
     if (dl) watchDownload();
+    if (multilingual && !sizeMb && !dl) void multilingualSize().then((mb) => mb && ((sizeMb = mb), step === "model" && BODY.model()));
   },
 
   perm() {
