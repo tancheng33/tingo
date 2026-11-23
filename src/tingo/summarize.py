@@ -9,7 +9,7 @@ from collections.abc import Callable
 from datetime import date, timedelta
 
 from . import i18n
-from .config import LLMConfig
+from .config import DEFAULT_TEMPERATURE, LLMConfig
 from .i18n import tr
 from .transcript import Transcript, fmt_ts
 
@@ -360,13 +360,22 @@ def _chat(
     if not think and _is_local(cfg):
         # Ollama 的 OpenAI 兼容接口用 reasoning_effort=none 关掉 Qwen3 等模型的思考；只对本地生效，远程接口未必认这个值
         extra["reasoning_effort"] = "none"
-    stream = _client(cfg).chat.completions.create(
-        model=cfg.model,
-        messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
-        temperature=0.2,
-        stream=True,
-        extra_body=extra or None,
-    )
+    import openai
+
+    request: dict = {
+        "model": cfg.model,
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+        "temperature": temperature(cfg),
+        "stream": True,
+        "extra_body": extra or None,
+    }
+    client = _client(cfg)
+    try:
+        stream = client.chat.completions.create(**request)
+    except openai.BadRequestError as e:
+        if not drop_rejected_temperature(request, str(e)):
+            raise
+        stream = client.chat.completions.create(**request)
     for chunk in stream:
         if not chunk.choices:
             continue
@@ -378,6 +387,22 @@ def _chat(
             out.think(reasoning)
         out.text(d.content or "")
     return out.result()
+
+
+def temperature(cfg: LLMConfig) -> float:
+    """纪要默认用低温度，少发挥；有的模型只接受默认值（Kimi、OpenAI 的推理模型只认 1），设置里可以改。"""
+    return DEFAULT_TEMPERATURE if cfg.temperature is None else cfg.temperature
+
+
+def drop_rejected_temperature(request: dict, error: str) -> bool:
+    """模型因为 temperature 回 400 时（只接受默认温度的模型），去掉 temperature 用模型自己的默认值再发一次。
+
+    返回 True 表示去掉了、可以重发；已经去掉过或者不是温度的问题时返回 False。与桌面版的 send_llm 一致。
+    """
+    if "temperature" not in error.lower() or "temperature" not in request:
+        return False
+    del request["temperature"]
+    return True
 
 
 ANTHROPIC_VERSION = "2023-06-01"
@@ -421,49 +446,59 @@ def _chat_anthropic(cfg: LLMConfig, prompt: str, system: str, out: _Output) -> N
         "max_tokens": ANTHROPIC_MAX_TOKENS,
         "system": system,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.2,
+        "temperature": temperature(cfg),
         "stream": True,
     }
     url = cfg.base_url
     try:
-        with httpx.stream(
-            "POST",
-            anthropic_v1(cfg.base_url) + "/messages",
-            headers=anthropic_headers(key),
-            json=body,
-            timeout=httpx.Timeout(1800, connect=20),
-        ) as r:
-            if r.status_code >= 400:
-                text = r.read().decode("utf-8", "replace")[:300]
-                raise RuntimeError(
-                    tr(f"大模型返回 {r.status_code}：{text}", f"The language model returned {r.status_code}: {text}")
-                )
-            try:
-                for line in r.iter_lines():
-                    if not line.startswith("data:"):
+        # 第二遍只在模型拒绝 temperature、去掉它重发时才会走到
+        for _ in range(2):
+            with httpx.stream(
+                "POST",
+                anthropic_v1(cfg.base_url) + "/messages",
+                headers=anthropic_headers(key),
+                json=body,
+                timeout=httpx.Timeout(1800, connect=20),
+            ) as r:
+                if r.status_code >= 400:
+                    text = r.read().decode("utf-8", "replace")[:300]
+                    if r.status_code == 400 and drop_rejected_temperature(body, text):
                         continue
-                    try:
-                        event = json.loads(line[len("data:") :].strip())
-                    except ValueError:
-                        continue
-                    if not isinstance(event, dict):
-                        continue
-                    kind = event.get("type")
-                    if kind == "content_block_delta":
-                        delta = event.get("delta") or {}
-                        if delta.get("type") == "text_delta":
-                            out.text(delta.get("text") or "")
-                        elif delta.get("type") == "thinking_delta":
-                            out.think(delta.get("thinking") or "")
-                    elif kind == "error":
-                        msg = (event.get("error") or {}).get("message") or "unknown error"
-                        raise RuntimeError(tr(f"大模型返回错误：{msg}", f"The language model returned an error: {msg}"))
-                    elif kind == "message_stop":
-                        break
-            except httpx.HTTPError as e:
-                raise RuntimeError(
-                    tr(f"读取大模型输出中断：{e}", f"Lost the connection while reading the model's output: {e}")
-                ) from e
+                    raise RuntimeError(
+                        tr(
+                            f"大模型返回 {r.status_code}：{text}",
+                            f"The language model returned {r.status_code}: {text}",
+                        )
+                    )
+                try:
+                    for line in r.iter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        try:
+                            event = json.loads(line[len("data:") :].strip())
+                        except ValueError:
+                            continue
+                        if not isinstance(event, dict):
+                            continue
+                        kind = event.get("type")
+                        if kind == "content_block_delta":
+                            delta = event.get("delta") or {}
+                            if delta.get("type") == "text_delta":
+                                out.text(delta.get("text") or "")
+                            elif delta.get("type") == "thinking_delta":
+                                out.think(delta.get("thinking") or "")
+                        elif kind == "error":
+                            msg = (event.get("error") or {}).get("message") or "unknown error"
+                            raise RuntimeError(
+                                tr(f"大模型返回错误：{msg}", f"The language model returned an error: {msg}")
+                            )
+                        elif kind == "message_stop":
+                            break
+                except httpx.HTTPError as e:
+                    raise RuntimeError(
+                        tr(f"读取大模型输出中断：{e}", f"Lost the connection while reading the model's output: {e}")
+                    ) from e
+            break
     except httpx.HTTPError as e:
         raise RuntimeError(tr(f"连不上大模型（{url}）：{e}", f"Couldn't reach the language model ({url}): {e}")) from e
 

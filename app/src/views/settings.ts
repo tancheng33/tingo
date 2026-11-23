@@ -734,7 +734,10 @@ function panelLlm(x: Ctx): void {
           <button class="link-btn" id="sFetch" type="button">${ICON.redo}${t("获取模型列表", "Fetch models")}</button></label>
           <div class="combo"><input class="input" id="sModel" value="${esc(c.model)}" placeholder="${t("点这里从列表里选，也可以直接输入", "Pick from the list or type a model name")}" autocomplete="off" spellcheck="false"><span class="combo-arrow">${ICON.chevron}</span><div class="combo-pop" id="sModelPop" hidden></div></div></div>
       </div>
-      <div class="field"><label>API Key</label><input class="input" id="sKey" type="password" autocomplete="off" placeholder="${keyHint}"></div>
+      <div class="s-row2">
+        <div class="field"><label>API Key</label><input class="input" id="sKey" type="password" autocomplete="off" placeholder="${keyHint}"></div>
+        <div class="field"><label>${t("温度（可选）", "Temperature (optional)")}</label><input class="input" id="sTemp" inputmode="decimal" autocomplete="off" value="${c.temperature ?? ""}" placeholder="${t("留空用默认 0.2；Kimi 等只支持 1 的模型填 1", "Empty = 0.2; use 1 for models such as Kimi that only accept 1")}"></div>
+      </div>
     </div>
     ${panelFoot(`<button class="btn" id="sTest">${t("测试连接", "Test connection")}</button><span class="test-msg" id="sTestMsg"></span>`)}`;
 
@@ -867,7 +870,17 @@ function panelLlm(x: Ctx): void {
     }
   };
   $("#sSave").onclick = () =>
-    save(x, { base_url: baseInput().value.trim(), model: model.value.trim(), api_key: key.value.trim() || null, api: getApi() }, "llm");
+    save(
+      x,
+      {
+        base_url: baseInput().value.trim(),
+        model: model.value.trim(),
+        api_key: key.value.trim() || null,
+        api: getApi(),
+        temperature: $<HTMLInputElement>("#sTemp").value.trim(), // 空 = 默认；不合法时后端会说
+      },
+      "llm",
+    );
 }
 
 function panelHotwords(x: Ctx): void {

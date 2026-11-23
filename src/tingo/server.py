@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import itertools
+import math
 import os
 import platform
 import re
@@ -172,6 +173,7 @@ class ConfigRequest(BaseModel):
     model: str
     api_key: str | None = None  # None 表示不改
     api: str | None = None  # openai | anthropic，None 表示不改
+    temperature: Any = None  # 0～2 的数，空字符串 = 恢复默认，None 表示不改；类型自己检查（不对时回 400）
     hotwords: list[str] = []
     webhook: str = ""
     secret: str | None = None
@@ -531,6 +533,7 @@ def create_app(root: Path | None = None) -> FastAPI:
             "base_url": cfg.llm.base_url,
             "model": cfg.llm.model,
             "api": cfg.llm.api,
+            "temperature": cfg.llm.temperature,
             "api_key_set": bool(key),
             "api_key_hint": f"{key[:3]}…{key[-4:]}" if len(key) > 10 else (i18n.tr("已设置", "set") if key else ""),
             "hotwords": cfg.hotwords,
@@ -556,6 +559,22 @@ def create_app(root: Path | None = None) -> FastAPI:
             if api not in config.LLM_APIS:
                 raise HTTPException(400, i18n.tr(f"不认识的接口协议：{req.api}", f"Unknown API protocol: {req.api}"))
             cfg.llm.api = api
+        if req.temperature is not None:
+            t = req.temperature
+            if isinstance(t, str):
+                try:
+                    t = float(t) if t.strip() else None
+                except ValueError:
+                    t = math.nan
+            if t is not None and not config.valid_temperature(t):
+                raise HTTPException(
+                    400,
+                    i18n.tr(
+                        "温度要填 0～2 之间的数，留空用默认的 0.2",
+                        "Temperature must be a number from 0 to 2; leave it empty for the default 0.2",
+                    ),
+                )
+            cfg.llm.temperature = None if t is None else float(t)
         cfg.hotwords = [w.strip() for w in req.hotwords if w.strip()]
         cfg.webhook = req.webhook.strip()
         if req.secret is not None:

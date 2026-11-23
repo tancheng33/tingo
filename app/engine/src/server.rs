@@ -609,6 +609,7 @@ fn config_json(s: &AppState) -> Value {
         "base_url": c.llm.base_url,
         "model": c.llm.model,
         "api": c.llm.api,
+        "temperature": c.llm.temperature,
         "api_key_set": !key.is_empty(),
         "api_key_hint": hint,
         "hotwords": c.hotwords,
@@ -650,6 +651,8 @@ struct ConfigReq {
     asr_language: Option<String>,
     /// 接口协议 openai | anthropic，不传就不改
     api: Option<String>,
+    /// 采样温度：0～2 的数，空字符串 = 恢复默认，不传就不改
+    temperature: Option<Value>,
     /// 自动结束录音：没人说话多少分钟（0–240 的整数，0 = 不自动结束）、会议软件退出时是否结束；不传就不改
     auto_stop_silence_min: Option<Value>,
     auto_stop_app_quit: Option<bool>,
@@ -690,6 +693,18 @@ async fn put_config(State(s): State<Shared>, Json(r): Json<ConfigReq>) -> ApiRes
     }
     if let Some(k) = r.api_key {
         c.llm.api_key = k.trim().into();
+    }
+    if let Some(t) = &r.temperature {
+        c.llm.temperature = match t {
+            Value::Null => None,
+            Value::String(v) if v.trim().is_empty() => None,
+            Value::Number(n) => n.as_f64(),
+            Value::String(v) => Some(v.trim().parse().unwrap_or(f64::NAN)),
+            _ => Some(f64::NAN),
+        };
+        if c.llm.temperature.is_some_and(|t| !config::valid_temperature(t)) {
+            return Err(bad(tr("温度要填 0～2 之间的数，留空用默认的 0.2", "Temperature must be a number from 0 to 2; leave it empty for the default 0.2")));
+        }
     }
     c.hotwords = r
         .hotwords
@@ -2309,6 +2324,32 @@ mod tests {
         assert_eq!(s.root(), root);
         assert!(!s.opt.config_path.exists());
         assert!(std::fs::read_dir(&target).unwrap().next().is_none());
+        std::fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn config_temperature_set_clear_and_reject() {
+        let (s, root, _) = test_state("temperature");
+        let put = |t: Option<Value>| {
+            let mut body = json!({"base_url": "https://api.moonshot.cn/v1", "model": "kimi"});
+            if let Some(t) = t { body["temperature"] = t; }
+            put_config(State(s.clone()), Json(serde_json::from_value(body).unwrap()))
+        };
+        assert!(put(Some(json!(1))).await.is_ok());
+        assert_eq!(s.config().llm.temperature, Some(1.0));
+        assert_eq!(config_json(&s)["temperature"], 1.0);
+        // 不传就不改（别的设置页保存时不带这个字段）
+        assert!(put(None).await.is_ok());
+        assert_eq!(s.config().llm.temperature, Some(1.0));
+        for bad in [json!(3), json!("abc"), json!(-0.1)] {
+            assert_eq!(status(put(Some(bad)).await), StatusCode::BAD_REQUEST);
+        }
+        assert_eq!(s.config().llm.temperature, Some(1.0));
+        assert!(put(Some(json!(" 0.5 "))).await.is_ok());
+        assert_eq!(s.config().llm.temperature, Some(0.5));
+        assert!(put(Some(json!(""))).await.is_ok());
+        assert_eq!(s.config().llm.temperature, None);
+        assert!(config_json(&s)["temperature"].is_null());
         std::fs::remove_dir_all(root.parent().unwrap()).unwrap();
     }
 

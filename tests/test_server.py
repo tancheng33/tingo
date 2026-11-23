@@ -539,6 +539,17 @@ def test_config_language_fields(client, tmp_path):
     assert r.status_code == 400 and r.json()["detail"] == "Unsupported language: fr"
 
 
+def test_config_temperature_set_clear_and_reject(client):
+    body = {"base_url": "https://api.moonshot.cn/v1", "model": "kimi", "hotwords": [], "webhook": ""}
+    assert client.get("/api/config").json()["temperature"] is None
+    assert client.put("/api/config", json={**body, "temperature": 1}).json()["temperature"] == 1.0
+    assert client.put("/api/config", json=body).json()["temperature"] == 1.0  # 不传就不改
+    for bad in (3, "abc", -0.1, True):
+        assert client.put("/api/config", json={**body, "temperature": bad}).status_code == 400
+    assert client.put("/api/config", json={**body, "temperature": " 0.5 "}).json()["temperature"] == 0.5
+    assert client.put("/api/config", json={**body, "temperature": ""}).json()["temperature"] is None
+
+
 def test_minutes_language_setting_used_and_english_stages(client, root, monkeypatch):
     from tingo import config
 

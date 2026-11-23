@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import tomllib
 from dataclasses import dataclass, field
@@ -41,6 +42,8 @@ model = "deepseek-chat"
 # base_url = "http://localhost:11434/v1"
 # api_key = "ollama"
 # model = "qwen2.5:7b"
+# 采样温度（0～2），不写就用 0.2；Kimi 等只接受 1 的模型写 temperature = 1
+# temperature = 1
 
 [push]
 # 飞书 / 钉钉 / 企业微信 群机器人 webhook，按域名自动识别
@@ -56,6 +59,15 @@ class LLMConfig:
     api_key: str = ""
     model: str = "deepseek-chat"
     api: str = "openai"  # 接口协议：openai（OpenAI 兼容的 chat/completions）| anthropic（Claude 的 messages）
+    temperature: float | None = None  # 采样温度 0～2，None = 默认 0.2
+
+
+DEFAULT_TEMPERATURE = 0.2
+
+
+def valid_temperature(value: object) -> bool:
+    """设置里能填的温度：0～2 的数。与桌面版的 valid_temperature 一致。"""
+    return isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value) and 0 <= value <= 2
 
 
 LLM_APIS = ("openai", "anthropic")
@@ -135,6 +147,8 @@ def load() -> Config:
             api_key=llm.get("api_key", ""),
             model=llm.get("model", LLMConfig.model),
             api=normalize_api(llm.get("api")),
+            # 写错了只忽略这一项，不连带别的配置
+            temperature=float(t) if valid_temperature(t := llm.get("temperature")) else None,
         ),
         hotwords=list(data.get("hotwords", llm.get("hotwords", []))),  # 早期模板误把 hotwords 写在 [llm] 下
         webhook=push.get("webhook", ""),
@@ -191,7 +205,9 @@ def save(cfg: Config) -> Path:
         f"base_url = {_toml_str(cfg.llm.base_url)}\n"
         f"api_key = {_toml_str(cfg.llm.api_key)}\n"
         f"model = {_toml_str(cfg.llm.model)}\n"
-        f"api = {_toml_str(cfg.llm.api)}\n\n"
+        f"api = {_toml_str(cfg.llm.api)}\n"
+        + (f"temperature = {float(cfg.llm.temperature)!r}\n" if cfg.llm.temperature is not None else "")
+        + "\n"
         "[push]\n"
         f"webhook = {_toml_str(cfg.webhook)}\n"
         f"secret = {_toml_str(cfg.webhook_secret)}\n\n"
