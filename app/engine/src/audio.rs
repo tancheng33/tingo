@@ -20,6 +20,8 @@ struct Header {
     rate: usize,
     width: usize,
     data_start: u64,
+    /// 文件头里写的 data 块长度（字节）。录音被打断时可能是 0 或者没回填
+    data_len: u32,
 }
 
 impl GrowingWav {
@@ -88,6 +90,11 @@ fn parse_header(path: &Path) -> Option<Header> {
     let head = &head[..n];
     let find = |tag: &[u8]| head.windows(4).position(|w| w == tag);
     let (fmt_at, data_at) = (find(b"fmt ")?, find(b"data")?);
+    if !head.starts_with(b"RIFF") || head.get(8..12) != Some(b"WAVE")
+        || fmt_at + 24 > head.len() || data_at + 8 > head.len()
+    {
+        return None;
+    }
     let u16_at = |i: usize| u16::from_le_bytes([head[i], head[i + 1]]);
     let u32_at = |i: usize| u32::from_le_bytes([head[i], head[i + 1], head[i + 2], head[i + 3]]);
     let mut tag = u16_at(fmt_at + 8);
@@ -95,8 +102,10 @@ fn parse_header(path: &Path) -> Option<Header> {
     let rate = u32_at(fmt_at + 12) as usize;
     let bits = u16_at(fmt_at + 22) as usize;
     if tag == 0xFFFE {
+        if fmt_at + 34 > head.len() { return None; }
         tag = u16_at(fmt_at + 8 + 24); // WAVE_FORMAT_EXTENSIBLE：真实格式在子格式 GUID 的前两个字节
     }
+    if channels == 0 || rate == 0 { return None; }
     let float = match (tag, bits) {
         (3, 32) => true,
         (1, 16) => false,
@@ -108,7 +117,46 @@ fn parse_header(path: &Path) -> Option<Header> {
         rate,
         width: bits / 8,
         data_start: data_at as u64 + 8,
+        data_len: u32_at(data_at + 4),
     })
+}
+
+/// 进程被杀后 WAV 的长度可能还没回填。按实际数据量流式复制并重建文件头，
+/// 不修改原始录音，也不把长录音整个读入内存。仅在录音已停止后调用。
+pub fn recover_wav(source: &Path, dest: &Path) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    let invalid = || Error::new(ErrorKind::InvalidData, "No recoverable PCM audio");
+    let h = parse_header(source).ok_or_else(invalid)?;
+    let mut input = File::open(source)?;
+    let frame = (h.width * h.channels) as u64;
+    let size = input.metadata()?.len().saturating_sub(h.data_start);
+    let size = size - size % frame;
+    if size == 0 || size > (u32::MAX - 36) as u64 { return Err(invalid()); }
+    input.seek(SeekFrom::Start(h.data_start))?;
+    let staging = dest.with_extension("recovering");
+    let result = (|| {
+        let mut output = File::create(&staging)?;
+        output.write_all(b"RIFF")?;
+        output.write_all(&(36 + size as u32).to_le_bytes())?;
+        output.write_all(b"WAVEfmt ")?;
+        output.write_all(&16u32.to_le_bytes())?;
+        output.write_all(&(if h.float { 3u16 } else { 1u16 }).to_le_bytes())?;
+        output.write_all(&(h.channels as u16).to_le_bytes())?;
+        output.write_all(&(h.rate as u32).to_le_bytes())?;
+        output.write_all(&(h.rate as u32 * frame as u32).to_le_bytes())?;
+        output.write_all(&(frame as u16).to_le_bytes())?;
+        output.write_all(&(h.width as u16 * 8).to_le_bytes())?;
+        output.write_all(b"data")?;
+        output.write_all(&(size as u32).to_le_bytes())?;
+        if std::io::copy(&mut input.take(size), &mut output)? != size {
+            return Err(Error::new(ErrorKind::UnexpectedEof, "Recording changed during recovery"));
+        }
+        output.sync_all()?;
+        drop(output);
+        std::fs::rename(&staging, dest)
+    })();
+    if result.is_err() { let _ = std::fs::remove_file(staging); }
+    result
 }
 
 fn decode_mono(raw: &[u8], h: Header) -> Vec<f32> {
@@ -141,6 +189,76 @@ pub fn resample(x: &[f32], rate: usize) -> Vec<f32> {
 }
 
 /// 读整个 wav 文件为 16 kHz 单声道（只认 16 位整型 / 32 位浮点 PCM）。
+/// 16 kHz 单声道 16 位的 wav 的文件头（录音、解码出来的都是这个格式）；不是这个格式返回 None
+fn wav16_header(path: &Path) -> Option<Header> {
+    parse_header(path).filter(|h| !h.float && h.channels == 1 && h.rate == SR && h.width == 2)
+}
+
+/// 是不是 16 kHz 单声道 16 位的 wav，是的话可以直接拿来拼接。
+pub fn is_wav16(path: &Path) -> bool {
+    wav16_header(path).is_some()
+}
+
+/// 把几段 16 kHz 单声道 16 位的 wav 首尾接成一个。流式复制，不把声音读进内存（一小时的录音有一百多 MB）。
+/// 返回每一段的采样数。长度按文件头里 data 块的长度算，data 块后面还有别的块（LIST、id3）时不会把它们当成声音；
+/// 文件头没写完（被中断的录音，长度是 0 或者比文件还长）时按文件实际大小算。
+pub fn concat_wav16(parts: &[PathBuf], dest: &Path) -> std::io::Result<Vec<u64>> {
+    use std::io::{Error, ErrorKind};
+    let invalid = |p: &Path| Error::new(ErrorKind::InvalidData, format!("not a 16 kHz mono 16-bit wav: {}", p.display()));
+    let mut spans = Vec::with_capacity(parts.len()); // 每一段数据的起点和字节数
+    for p in parts {
+        let h = wav16_header(p).ok_or_else(|| invalid(p))?;
+        let actual = std::fs::metadata(p)?.len().saturating_sub(h.data_start);
+        let declared = h.data_len as u64;
+        // 只有 data 块后面确实接着另一个块时才按文件头截：文件头里的长度过期（录音被打断）时不能截掉真实的声音
+        let size = if declared > 0 && declared < actual && next_chunk_at(p, h.data_start + declared + declared % 2) {
+            declared
+        } else {
+            actual
+        };
+        spans.push((h.data_start, size - size % 2));
+    }
+    let total: u64 = spans.iter().map(|s| s.1).sum();
+    if total > (u32::MAX - 36) as u64 {
+        return Err(Error::new(ErrorKind::InvalidData, "merged recording is too long for a wav file"));
+    }
+    let mut out = File::create(dest)?;
+    out.write_all(b"RIFF")?;
+    out.write_all(&(36 + total as u32).to_le_bytes())?;
+    out.write_all(b"WAVEfmt ")?;
+    out.write_all(&16u32.to_le_bytes())?;
+    out.write_all(&1u16.to_le_bytes())?;
+    out.write_all(&1u16.to_le_bytes())?;
+    out.write_all(&(SR as u32).to_le_bytes())?;
+    out.write_all(&(SR as u32 * 2).to_le_bytes())?;
+    out.write_all(&2u16.to_le_bytes())?;
+    out.write_all(&16u16.to_le_bytes())?;
+    out.write_all(b"data")?;
+    out.write_all(&(total as u32).to_le_bytes())?;
+    for (p, &(start, size)) in parts.iter().zip(&spans) {
+        let mut input = File::open(p)?;
+        input.seek(SeekFrom::Start(start))?;
+        if std::io::copy(&mut input.take(size), &mut out)? != size {
+            return Err(Error::new(ErrorKind::UnexpectedEof, format!("recording changed while merging: {}", p.display())));
+        }
+    }
+    out.sync_all()?;
+    Ok(spans.iter().map(|s| s.1 / 2).collect())
+}
+
+/// 文件的这个位置是不是一个 RIFF 块的开头：4 个可打印 ASCII 字符的块名（LIST、id3 ……），
+/// 后面写的块长度也装得下（不会超出文件末尾）
+fn next_chunk_at(path: &Path, at: u64) -> bool {
+    let mut head = [0u8; 8];
+    let Ok(len) = std::fs::metadata(path).map(|m| m.len()) else { return false };
+    let read = File::open(path).and_then(|mut f| {
+        f.seek(SeekFrom::Start(at))?;
+        f.read_exact(&mut head)
+    });
+    let size = u32::from_le_bytes([head[4], head[5], head[6], head[7]]) as u64;
+    read.is_ok() && head[..4].iter().all(|b| b.is_ascii_graphic() || *b == b' ') && at + 8 + size <= len
+}
+
 pub fn read_wav16k(path: &Path) -> Option<Vec<f32>> {
     let mut w = GrowingWav::new(path);
     let secs = w.seconds();
@@ -446,6 +564,33 @@ mod tests {
         let speech = tone(30.0, 0.3);
         assert_eq!(find_cut(&speech, false, 20.0, 10.0), None);
         assert!(find_cut(&speech, true, 20.0, 10.0).is_some());
+    }
+
+    #[test]
+    fn concat_reads_only_the_data_chunk() {
+        let dir = std::env::temp_dir().join(format!("tingo-concat-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b, out) = (dir.join("a.wav"), dir.join("b.wav"), dir.join("out.wav"));
+        crate::record::write_wav16(&a, &tone(1.0, 0.3)).unwrap();
+        crate::record::write_wav16(&b, &tone(0.5, 0.3)).unwrap();
+        // a 的 data 块后面跟着一个 LIST 块（导入的文件常见）
+        let mut f = std::fs::OpenOptions::new().append(true).open(&a).unwrap();
+        f.write_all(b"LIST\x04\x00\x00\x00INFO").unwrap();
+        drop(f);
+        // b 的文件头没回填（被中断的录音）：按实际大小算
+        let mut bytes = std::fs::read(&b).unwrap();
+        bytes[40..44].copy_from_slice(&0u32.to_le_bytes());
+        std::fs::write(&b, bytes).unwrap();
+        assert_eq!(concat_wav16(&[a, b], &out).unwrap(), vec![SR as u64, SR as u64 / 2]);
+        assert_eq!(read_wav16k(&out).unwrap().len(), SR * 3 / 2);
+        // 文件头里的长度过期（比实际短）、后面也不是别的块：整段都算
+        let c = dir.join("c.wav");
+        crate::record::write_wav16(&c, &tone(1.0, 0.3)).unwrap();
+        let mut bytes = std::fs::read(&c).unwrap();
+        bytes[40..44].copy_from_slice(&1000u32.to_le_bytes());
+        std::fs::write(&c, bytes).unwrap();
+        assert_eq!(concat_wav16(&[c], &out).unwrap(), vec![SR as u64]);
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

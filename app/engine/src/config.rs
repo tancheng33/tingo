@@ -12,6 +12,9 @@ pub struct LlmConfig {
     pub api: String,
     /// [llm] temperature：采样温度（0～2），None = 默认 0.2。Kimi 等只接受 1 的模型可以改成 1
     pub temperature: Option<f64>,
+    /// [llm] think：写纪要时让模型深度思考。默认关：推理模型读长会议要先想好几分钟。
+    /// 关掉时会请模型别思考；有的模型关不掉（MiniMax-M3.1 只能少想），就请它少想
+    pub think: bool,
 }
 
 /// 设置里能填的温度范围
@@ -27,6 +30,7 @@ impl Default for LlmConfig {
             model: "deepseek-chat".into(),
             api: "openai".into(),
             temperature: None,
+            think: false,
         }
     }
 }
@@ -58,6 +62,8 @@ pub struct Config {
     pub ui_language: String,
     /// [minutes] language：auto | zh | en，纪要语言；auto = 跟会议转写的语言
     pub minutes_language: String,
+    /// [minutes] live：录音时每隔两分钟把新说的话交给大模型，边开会边整理纪要（结束后照常完整写一遍）
+    pub live_minutes: bool,
     /// [asr] language：zh | en | auto，会议语言（SenseVoice / Fun-ASR-Nano 用；Paraformer 只认中文）
     pub asr_language: String,
     /// [record] auto_stop_silence_min：连续这么多分钟没人说话就自动结束录音，0 表示不自动结束
@@ -77,6 +83,7 @@ impl Default for Config {
             obsidian: ObsidianConfig::default(),
             ui_language: "auto".into(),
             minutes_language: "auto".into(),
+            live_minutes: true,
             asr_language: "zh".into(),
             auto_stop_silence_min: DEFAULT_SILENCE_MIN,
             auto_stop_app_quit: true,
@@ -105,6 +112,7 @@ struct RawLlm {
     api: Option<String>,
     // 写错类型（比如写成字符串）不能让整个配置读不出来，所以先按任意值读
     temperature: Option<toml::Value>,
+    think: Option<bool>,
     hotwords: Option<Vec<String>>, // 早期模板误把 hotwords 写在 [llm] 下
 }
 
@@ -125,6 +133,8 @@ struct RawObsidian {
 #[derive(Deserialize, Default)]
 struct RawLang {
     language: Option<String>,
+    /// 只有 [minutes] 用
+    live: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -212,6 +222,7 @@ pub fn load(path: &Path) -> Config {
                 .temperature
                 .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
                 .filter(|t| valid_temperature(*t)),
+            think: raw.llm.think.unwrap_or(false),
         },
         hotwords: raw.hotwords.or(raw.llm.hotwords).unwrap_or_default(),
         webhook: raw.push.webhook.unwrap_or_default(),
@@ -227,6 +238,7 @@ pub fn load(path: &Path) -> Config {
         },
         ui_language: language(raw.ui.language, "auto"),
         minutes_language: language(raw.minutes.language, "auto"),
+        live_minutes: raw.minutes.live.unwrap_or(true),
         asr_language: language(raw.asr.language, "zh"),
         auto_stop_silence_min: raw
             .record
@@ -272,13 +284,14 @@ fn quote(s: &str) -> String {
 pub fn save(path: &Path, cfg: &Config) -> std::io::Result<()> {
     let words: Vec<String> = cfg.hotwords.iter().map(|w| quote(w)).collect();
     let text = format!(
-        "# tingo 配置，由图形界面写入；也可以直接编辑。\n\n# 专有名词、人名、项目代号，提高识别准确率\nhotwords = [{}]\n\n[llm]\nbase_url = {}\napi_key = {}\nmodel = {}\napi = {}\n{}\n[push]\nwebhook = {}\nsecret = {}\n\n[obsidian]\nvault = {}\nfolder = {}\nauto = {}\ntranscript = {}\n\n[ui]\nlanguage = {}\n\n[minutes]\nlanguage = {}\n\n[asr]\nlanguage = {}\n\n[record]\nauto_stop_silence_min = {}\nauto_stop_app_quit = {}\n\n[storage]\nroot = {}\n",
+        "# tingo 配置，由图形界面写入；也可以直接编辑。\n\n# 专有名词、人名、项目代号，提高识别准确率\nhotwords = [{}]\n\n[llm]\nbase_url = {}\napi_key = {}\nmodel = {}\napi = {}\n{}{}\n[push]\nwebhook = {}\nsecret = {}\n\n[obsidian]\nvault = {}\nfolder = {}\nauto = {}\ntranscript = {}\n\n[ui]\nlanguage = {}\n\n[minutes]\nlanguage = {}\nlive = {}\n\n[asr]\nlanguage = {}\n\n[record]\nauto_stop_silence_min = {}\nauto_stop_app_quit = {}\n\n[storage]\nroot = {}\n",
         words.join(", "),
         quote(&cfg.llm.base_url),
         quote(&cfg.llm.api_key),
         quote(&cfg.llm.model),
         quote(&cfg.llm.api),
         cfg.llm.temperature.map(|t| format!("temperature = {t:?}\n")).unwrap_or_default(),
+        if cfg.llm.think { "think = true\n" } else { "" },
         quote(&cfg.webhook),
         quote(&cfg.webhook_secret),
         quote(&cfg.obsidian.vault),
@@ -287,6 +300,7 @@ pub fn save(path: &Path, cfg: &Config) -> std::io::Result<()> {
         cfg.obsidian.transcript,
         quote(&cfg.ui_language),
         quote(&cfg.minutes_language),
+        cfg.live_minutes,
         quote(&cfg.asr_language),
         cfg.auto_stop_silence_min,
         cfg.auto_stop_app_quit,
@@ -336,6 +350,7 @@ mod tests {
                 model: "deepseek/deepseek-v4-flash".into(),
                 api: "anthropic".into(),
                 temperature: Some(1.0),
+                think: true,
             },
             storage_root: "/Volumes/会议资料/Tingo".into(),
             hotwords: vec!["星河".into(), "Kafka".into()],
@@ -392,9 +407,12 @@ mod tests {
         // 写在 [obsidian] 之后，顺序 [ui]、[minutes]、[asr]
         let pos = |k: &str| text.find(k).unwrap();
         assert!(pos("[obsidian]") < pos("[ui]") && pos("[ui]") < pos("[minutes]") && pos("[minutes]") < pos("[asr]"));
-        assert!(text.contains("transcript = true\n\n[ui]\nlanguage = \"en\"\n\n[minutes]\nlanguage = \"zh\"\n\n[asr]\nlanguage = \"auto\"\n\n[record]\nauto_stop_silence_min = 10\nauto_stop_app_quit = true\n"));
+        assert!(text.contains("transcript = true\n\n[ui]\nlanguage = \"en\"\n\n[minutes]\nlanguage = \"zh\"\nlive = true\n\n[asr]\nlanguage = \"auto\"\n\n[record]\nauto_stop_silence_min = 10\nauto_stop_app_quit = true\n"));
         let c = load(&p);
         assert_eq!((c.ui_language.as_str(), c.minutes_language.as_str(), c.asr_language.as_str()), ("en", "zh", "auto"));
+        assert!(c.live_minutes);
+        save(&p, &Config { live_minutes: false, ..Default::default() }).unwrap();
+        assert!(!load(&p).live_minutes);
         // 老配置没有这三节、或者填了不认识的值：用默认
         std::fs::write(&p, "[llm]\nmodel = \"m\"\n\n[asr]\nlanguage = \"fr\"\n\n[minutes]\nlanguage = \"EN\"\n").unwrap();
         let c = load(&p);

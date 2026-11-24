@@ -1,7 +1,8 @@
 /* 新手引导：第一次打开时走一遍——认识 Tingo、下载识别模型、试录 3 秒确认权限、接上大模型、看示例会议。
    每一步都可以跳过；走完（或点"跳过引导"）后记在 localStorage，不再自动弹出，设置 → 运行环境里可以重新打开。 */
 
-import { api, type Config, type Job } from "../api";
+import { api, isIOS, type Config, type Job } from "../api";
+import { bindSourcePicker, downloadInit, sourcePicker, sourceSizeMb, type Source } from "../source";
 import { $, $maybe, errorMessage, esc, ICON, main, toast } from "../dom";
 import { lang, t } from "../i18n";
 import { poll } from "../poll";
@@ -85,17 +86,20 @@ function go(d: number): void {
 }
 
 /** 下载多语种模型要多大：基础模型（标点、声纹、VAD）+ SenseVoice */
-let sizeMb = 0;
-async function multilingualSize(): Promise<number> {
+/** 多语种：SenseVoice 比默认的 Paraformer 大多少（MB），首次下载的大小按它调整 */
+let sizeDelta: number | undefined;
+async function multilingualDelta(): Promise<number> {
   try {
     const r = await api<{ models: { id: string; size_mb: number }[] }>("/api/models");
     const size = (id: string) => r.models.find((m) => m.id === id)?.size_mb ?? 0;
-    const base = (S.env?.models_size_mb ?? 0) - size("paraformer");
-    return base > 0 && size("sensevoice") ? base + size("sensevoice") : 0;
+    return size("sensevoice") && size("paraformer") ? size("sensevoice") - size("paraformer") : 0;
   } catch {
     return 0;
   }
 }
+
+/** 引导里显示的首次下载大小：按选的线路，多语种再换成 SenseVoice 的大小 */
+const firstDownloadMb = (multilingual: boolean, src?: Source): number => sourceSizeMb(src) + (multilingual ? (sizeDelta ?? 0) : 0);
 
 /** 非中文界面：会议语言设成自动识别，再下载 SenseVoice（连同基础模型，下完自动设为当前模型） */
 async function downloadMultilingual(): Promise<Job> {
@@ -104,7 +108,7 @@ async function downloadMultilingual(): Promise<Job> {
     method: "PUT",
     json: { base_url: c.base_url, model: c.model, api_key: null, hotwords: c.hotwords, webhook: c.webhook, secret: null, asr_language: "auto" },
   });
-  return api<Job>("/api/models/sensevoice/download", { method: "POST" });
+  return api<Job>("/api/models/sensevoice/download", downloadInit());
 }
 
 const BODY: Record<Step, () => void> = {
@@ -112,10 +116,18 @@ const BODY: Record<Step, () => void> = {
     $("#wlBody").innerHTML = `
       <img src="data:image/svg+xml,${encodeURIComponent(document.querySelector(".brand-mark svg")?.outerHTML.replace("<svg", "<svg xmlns='http://www.w3.org/2000/svg'") ?? "")}" class="wl-logo" alt="">
       <h1>${t("开过的会，都听过。", "Every meeting, heard.")}</h1>
-      <p class="hint">${t("Tingo 录下会议，在这台 Mac 上转文字、分清谁说了什么，再由你选的大模型整理成纪要。花一分钟走完下面几步就能用。", "Tingo records your meetings, transcribes them on this Mac, tells speakers apart, and has the LLM you choose write the minutes. Take a minute to set it up.")}</p>
+      <p class="hint">${
+        isIOS()
+          ? t("Tingo 录下会议，在这台手机上转文字、分清谁说了什么，再由你选的大模型整理成纪要。花一分钟走完下面几步就能用。", "Tingo records your meetings, transcribes them on this iPhone, tells speakers apart, and has the LLM you choose write the minutes. Take a minute to set it up.")
+          : t("Tingo 录下会议，在这台 Mac 上转文字、分清谁说了什么，再由你选的大模型整理成纪要。花一分钟走完下面几步就能用。", "Tingo records your meetings, transcribes them on this Mac, tells speakers apart, and has the LLM you choose write the minutes. Take a minute to set it up.")
+      }</p>
       <ul class="wl-points">
-        <li>${ICON.mic}<span><b>${t("录音不出本机", "Audio stays on your Mac")}</b>${t("识别、区分说话人都在本地完成", "Recognition and speaker separation run locally")}</span></li>
-        <li>${ICON.monitor}<span><b>${t("直接录线上会议", "Records any call")}</b>${t("腾讯会议、飞书、Zoom 里对方的声音都能录", "Captures the other side in Zoom, Teams, Feishu…")}</span></li>
+        <li>${ICON.mic}<span><b>${isIOS() ? t("录音不出手机", "Audio stays on your iPhone") : t("录音不出本机", "Audio stays on your Mac")}</b>${t("识别、区分说话人都在本地完成", "Recognition and speaker separation run locally")}</span></li>
+        ${
+          isIOS()
+            ? `<li>${ICON.mic}<span><b>${t("放在桌上就能录", "Just put it on the table")}</b>${t("线下开会时把手机放在大家中间，锁屏也会继续录", "Place your iPhone in the middle of the room — it keeps recording when locked")}</span></li>`
+            : `<li>${ICON.monitor}<span><b>${t("直接录线上会议", "Records any call")}</b>${t("腾讯会议、飞书、Zoom 里对方的声音都能录", "Captures the other side in Zoom, Teams, Feishu…")}</span></li>`
+        }
         <li>${ICON.spark}<span><b>${t("结论有出处", "Every claim has a source")}</b>${t("纪要每条都能点回录音原话", "Each line plays back the original words")}</span></li>
       </ul>`;
   },
@@ -140,21 +152,22 @@ const BODY: Record<Step, () => void> = {
     // 默认的 Paraformer 只认中文。界面不是中文的人多半开英文（或日、韩语）会，改下多语种的 SenseVoice、会议语言自动识别
     const multilingual = lang() !== "zh";
     const intro = multilingual
-      ? `<p class="hint">One-time download${sizeMb ? ` (~${sizeMb} MB)` : ""}; recognition then works fully offline. Tingo will use <b>SenseVoice</b>, which recognizes English, Chinese, Japanese, Korean and Cantonese, even mixed in one meeting. For all-Chinese meetings you can switch to Paraformer-large in Settings → Speech model.</p>`
-      : `<p class="hint">只需下载一次（约 ${env.models_size_mb ?? 330} MB），之后识别全程离线。</p>`;
+      ? `<p class="hint">One-time download (~<span id="dlSize">${firstDownloadMb(true)}</span> MB); recognition then works fully offline. Tingo will use <b>SenseVoice</b>, which recognizes English, Chinese, Japanese, Korean and Cantonese, even mixed in one meeting. For all-Chinese meetings you can switch to Paraformer-large in Settings → Speech model.</p>`
+      : `<p class="hint">${t(`只需下载一次（约 <span id="dlSize">${firstDownloadMb(false)}</span> MB），之后识别全程离线。`, `One-time download (~<span id="dlSize">${firstDownloadMb(false)}</span> MB); recognition then works fully offline.`)}</p>`;
     box.innerHTML = `
       <h2>${t("下载识别模型", "Download the speech model")}</h2>
       ${intro}
       ${
         dl
           ? `<div class="asr-prog" style="width:100%"><div class="asr-bar"><i id="wlBar"></i></div><small id="wlText">${esc(dl.stage || t("准备下载…", "Starting download…"))}</small></div>`
-          : `<button class="btn primary" id="wlDl">${ICON.download}${t("下载模型", "Download")}</button>`
+          : `${sourcePicker()}<button class="btn primary" id="wlDl">${ICON.download}${t("下载模型", "Download")}</button>`
       }`;
+    bindSourcePicker(box, (src) => ($("#dlSize").textContent = String(firstDownloadMb(multilingual, src))));
     const b = $maybe("#wlDl");
     if (b)
       b.onclick = async () => {
         try {
-          const job = multilingual ? await downloadMultilingual() : await api<Job>("/api/models/download", { method: "POST" });
+          const job = multilingual ? await downloadMultilingual() : await api<Job>("/api/models/download", downloadInit());
           S.jobs = [...S.jobs, job];
           poll();
           BODY.model();
@@ -164,7 +177,7 @@ const BODY: Record<Step, () => void> = {
         }
       };
     if (dl) watchDownload();
-    if (multilingual && !sizeMb && !dl) void multilingualSize().then((mb) => mb && ((sizeMb = mb), step === "model" && BODY.model()));
+    if (multilingual && sizeDelta === undefined && !dl) void multilingualDelta().then((d) => ((sizeDelta = d), step === "model" && BODY.model()));
   },
 
   perm() {
@@ -180,7 +193,10 @@ const BODY: Record<Step, () => void> = {
       })[st] ?? st;
     box.innerHTML = `
       <h2>${t("录音权限", "Recording permissions")}</h2>
-      <p class="hint">${t(
+      <p class="hint">${isIOS() ? t(
+        "Tingo 需要麦克风权限来录会议。点下面的按钮试录 3 秒，系统会弹窗请求权限。试录时随便说句话。",
+        "Tingo needs microphone access to record meetings. Tap below to test for 3 seconds — iOS will ask for permission. Say something while it tests.",
+      ) : t(
         "Tingo 要两个权限：「麦克风」录你说的话，「屏幕与系统录音」录会议软件里对方的声音（只录声音，不录画面）。点下面的按钮试录 3 秒，系统会弹窗请求权限。试录时可以随便说句话、放点声音。",
         "Tingo needs two permissions: Microphone for your voice, and Screen & System Audio Recording for the other side of the call (audio only, never the screen). Click below to test for 3 seconds — macOS will ask for permission. Say something and play some audio while it tests.",
       )}</p>
@@ -188,11 +204,13 @@ const BODY: Record<Step, () => void> = {
       ${
         permResult
           ? `<div class="wl-perm">
-          <div class="${permResult.system}"><b>${icon(permResult.system)}</b>${t("系统声音", "System audio")}<small>${esc(label(permResult.system))}</small></div>
+          <div class="${permResult.system} desk-only"><b>${icon(permResult.system)}</b>${t("系统声音", "System audio")}<small>${esc(label(permResult.system))}</small></div>
           <div class="${permResult.mic}"><b>${icon(permResult.mic)}</b>${t("麦克风", "Microphone")}<small>${esc(label(permResult.mic))}</small></div>
         </div>
         ${
-          permResult.system === "denied" || permResult.mic === "denied"
+          permResult.mic === "denied" && isIOS()
+            ? `<p class="hint">${t("去「设置 → Tingo」打开麦克风，再回来试一次。", "Open Settings → Tingo, turn on Microphone, then come back and try again.")}</p>`
+            : permResult.system === "denied" || permResult.mic === "denied"
             ? `<p class="hint">${t(
                 "去「系统设置 → 隐私与安全性」，在「麦克风」和「屏幕与系统录音」里打开 Tingo，然后退出再重新打开 Tingo。之前拒绝过的话，可以在终端运行 <code>tccutil reset Microphone io.github.tancheng33.tingo</code> 和 <code>tccutil reset ScreenCapture io.github.tancheng33.tingo</code> 后重试。",
                 "Open System Settings → Privacy & Security, turn Tingo on under Microphone and Screen & System Audio Recording, then quit and reopen Tingo. If you denied it before, run <code>tccutil reset Microphone io.github.tancheng33.tingo</code> and <code>tccutil reset ScreenCapture io.github.tancheng33.tingo</code> in Terminal and try again.",

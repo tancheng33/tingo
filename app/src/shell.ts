@@ -11,6 +11,9 @@ const NARROW_BELOW = 1024;
 const isMac = navigator.platform.startsWith("Mac");
 const modKey = isMac ? "⌘" : "Ctrl+";
 const narrowQuery = window.matchMedia(`(max-width: ${NARROW_BELOW - 1}px)`);
+/** 手机版式（iPhone，或窗口窄到 820px 以下）：侧边栏变成底部标签栏，不收成图标栏，这里的收起、展开都不管 */
+const phoneQuery = window.matchMedia("(max-width: 820px)");
+const isPhone = (): boolean => phoneQuery.matches || document.documentElement.classList.contains("ios");
 
 /** 宽窗口下用户选了收起 */
 let closedPref = false;
@@ -37,6 +40,12 @@ const isCollapsed = (): boolean => (narrowQuery.matches ? !drawer : closedPref);
 
 /** 按当前状态更新外框；界面语言变了也要再调一次（按钮提示跟着换） */
 export function refreshShell(): void {
+  if (isPhone()) {
+    drawer = false;
+    $("#app").classList.remove("side-collapsed", "side-narrow", "side-drawer");
+    $("#sideScrim").hidden = true;
+    return;
+  }
   const narrow = narrowQuery.matches;
   const collapsed = isCollapsed();
   const app = $("#app");
@@ -53,6 +62,7 @@ export function refreshShell(): void {
 }
 
 export function toggleSidebar(): void {
+  if (isPhone()) return;
   if (narrowQuery.matches) drawer = !drawer;
   else {
     closedPref = !closedPref;
@@ -117,10 +127,11 @@ export function setupShell(): void {
 
   $("#sideToggle").onclick = toggleSidebar;
   $("#sideScrim").onclick = closeDrawer;
-  narrowQuery.addEventListener("change", () => {
-    drawer = false;
-    refreshShell();
-  });
+  for (const q of [narrowQuery, phoneQuery])
+    q.addEventListener("change", () => {
+      drawer = false;
+      refreshShell();
+    });
   window.addEventListener("hashchange", closeDrawer);
 
   const sidebar = $("#sidebar");

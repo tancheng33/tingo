@@ -44,9 +44,13 @@ Export the fishbone to [Excalidraw](https://excalidraw.com) with one click to ke
 
 <p align="center"><img src="docs/screenshots/excalidraw.png" width="720" alt="Fishbone exported to Excalidraw"></p>
 
+### Live minutes while you meet
+
+While recording, Tingo sends what was just said to your LLM every two minutes and keeps a running draft of the minutes under **Live minutes** on the recording page: summary, topics, decisions, action items and risks. Click a timestamp to jump to that line of the live transcript. Earlier topics settle so updates stay fast even in long meetings; when you stop, the full minutes are written from the whole transcript as usual. Turn it off in Settings › LLM.
+
 ### Never wait: start the next meeting right away
 
-After you stop recording, transcription and minutes run in the background and the home page is ready for the next meeting. The sidebar shows where each task is; open a meeting to watch the LLM write the minutes section by section. Reasoning models think for a minute or two before writing, so Tingo shows how much they've thought instead of looking stuck.
+After you stop recording, transcription and minutes run in the background and the home page is ready for the next meeting. The sidebar shows where each task is; open a meeting to watch the LLM write the minutes section by section. Minutes skip the model's deep thinking by default, so an hour-long meeting takes well under a minute; turn **Deep thinking** on in Settings › LLM for more careful owners and due dates.
 
 <p align="center"><img src="docs/screenshots/home.png" width="49%" alt="Home: background tasks"> <img src="docs/screenshots/generating.png" width="49%" alt="Minutes being written"></p>
 
@@ -84,6 +88,7 @@ Regenerating or editing the minutes keeps the previous version, and a failed gen
 - **Tags and archive**: tag meetings by project or type and filter by tag; archive finished ones (they stay searchable).
 - **Bulk actions**: select several meetings to tag, archive or delete them at once.
 - **Rename** any meeting without touching its folder.
+- **Continue and merge**: keep recording onto a meeting that was cut short, and the parts are joined into one meeting with one set of minutes; or select several meetings and merge them.
 - **Undoable deletes**: deleting a meeting or only its recording moves it to the Trash.
 - **Storage**: see what takes space and remove recordings older than N days (optionally only archived ones) while keeping transcripts and minutes.
 

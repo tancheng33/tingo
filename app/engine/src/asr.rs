@@ -72,8 +72,14 @@ impl ModelPaths {
     pub fn vad(&self) -> PathBuf {
         self.dir.join("silero_vad.onnx")
     }
+    /// GitHub 上下的是量化版，国内镜像只有完整版（models::Source）
     pub fn punct(&self) -> PathBuf {
-        self.dir.join("punct/model.int8.onnx")
+        let int8 = self.dir.join("punct/model.int8.onnx");
+        if int8.is_file() {
+            int8
+        } else {
+            self.dir.join("punct/model.onnx")
+        }
     }
     pub fn speaker(&self) -> PathBuf {
         self.dir.join("campplus_zh.onnx")

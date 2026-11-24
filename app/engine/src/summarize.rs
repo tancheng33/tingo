@@ -407,6 +407,99 @@ pub fn strip_think(text: &str, partial: bool) -> String {
     t
 }
 
+// 不管服务商默认的输出上限是多少，纪要都不能无限长下去。
+// 正文（含夹在正文里的 <think>）和单独字段里的思考分开算：推理模型读长会议时光思考就能写五六万字
+// （实测 MiniMax-M3.1-Flash 读 1.1 万字转写想了 5.9 万字，两分钟写完），这是正常的，不能当失控掐掉。
+// 真失控（原地打转）靠 repeated_tail 发现，这两个上限只兜底。
+const MAX_STREAM_CHARS: usize = 64_000;
+const MAX_THINK_CHARS: usize = 240_000;
+const MAX_MINUTES_CHARS: usize = 32_000;
+
+fn check_stream_size(raw_chars: usize, thought_chars: usize) -> Result<(), String> {
+    if thought_chars > MAX_THINK_CHARS {
+        return Err(tr("大模型思考了二十多万字还没开始写，已停止生成。可以重试，或换用不深度思考的模型。", "The model thought for over 200,000 characters without starting the minutes; generation was stopped. Retry, or choose a model without deep thinking.").into());
+    }
+    if raw_chars > MAX_STREAM_CHARS {
+        return Err(tr("模型输出异常过长，已停止生成。请换用非深度思考模型后重试。", "Model output exceeded the safety limit. Retry with a non-reasoning model.").into());
+    }
+    Ok(())
+}
+
+/// 思考内容只留最后几千字，够看出是不是在原地打转就行
+fn push_think_tail(tail: &mut String, text: &str) {
+    tail.push_str(text);
+    let n = tail.chars().count();
+    if n > 4096 {
+        let cut = tail.char_indices().nth(n - 4096).map(|(i, _)| i).unwrap_or(0);
+        tail.drain(..cut);
+    }
+}
+
+fn repeated_tail(text: &str) -> bool {
+    let tail: Vec<char> = text.chars().rev().take(2048).collect();
+    (128..=512).any(|n| {
+        tail.len() >= n * 4 && tail[..n].iter().filter(|c| !c.is_whitespace()).count() >= 64
+            && (1..4).all(|i| tail[..n] == tail[i * n..(i + 1) * n])
+    })
+}
+
+fn finish_reason(reason: &str) -> Result<(), String> {
+    match reason {
+        "stop" | "end_turn" | "stop_sequence" => Ok(()),
+        "length" | "max_tokens" => Err(tr("模型达到输出上限，纪要尚未完成。", "The model reached its output limit before finishing the minutes.").into()),
+        _ => Err(tr(&format!("模型提前结束输出（{reason}），纪要尚未完成。"), &format!("The model stopped early ({reason}); the minutes are incomplete.")).into()),
+    }
+}
+
+/// 一次请求失败的原因。`dropped`：连接中途断了（App 在后台被挂起、网络切换、服务端掐断长连接），
+/// 重新请求多半能成；别的错误（没配 Key、模型报错、输出超长）重试也没用。
+#[derive(Debug)]
+struct Failure {
+    message: String,
+    dropped: bool,
+}
+
+impl From<String> for Failure {
+    fn from(message: String) -> Self {
+        Failure { message, dropped: false }
+    }
+}
+
+impl From<&str> for Failure {
+    fn from(message: &str) -> Self {
+        message.to_string().into()
+    }
+}
+
+fn dropped(message: String) -> Failure {
+    Failure { message, dropped: true }
+}
+
+fn stream_read_error(error: std::io::Error) -> Failure {
+    use std::error::Error;
+    let mut details = vec![error.to_string()];
+    let mut cause = error.source();
+    for _ in 0..4 {
+        let Some(current) = cause else { break };
+        let message = current.to_string();
+        if details.last() != Some(&message) { details.push(message); }
+        cause = current.source();
+    }
+    let detail: String = details.join(" → ").chars().take(400).collect();
+    dropped(tr(&format!("读取大模型输出中断：{detail}"), &format!("Lost the connection while reading the model's output: {detail}")).into())
+}
+
+fn completed_text(raw: &str, complete: bool) -> Result<String, Failure> {
+    if !complete {
+        return Err(dropped(tr("模型连接提前结束，未收到完成标记。", "The model connection ended without a completion marker.").into()));
+    }
+    let text = strip_think(raw, false).trim().to_string();
+    if text.is_empty() {
+        return Err(tr("模型没有返回纪要正文，请重试或更换模型。", "The model returned no minutes. Retry or choose another model.").into());
+    }
+    Ok(text)
+}
+
 /// 纪要默认用低温度，少发挥。有的模型只接受默认值（Kimi、OpenAI 的推理模型只认 1），设置里可以改。
 pub const DEFAULT_TEMPERATURE: f64 = 0.2;
 
@@ -419,8 +512,17 @@ fn http_error(status: reqwest::StatusCode, text: &str) -> String {
     tr(&format!("大模型返回 {status}：{text}"), &format!("The language model returned {status}: {text}")).into()
 }
 
-/// 发请求，返回成功的响应。模型因为 temperature 回 400 时（只接受默认温度的模型，比如 Kimi 只认 1），
-/// 去掉 temperature 用模型自己的默认值再发一次，不用用户先去设置里改。
+/// 请模型别思考的参数：DeepSeek、Kimi、GLM、豆包认 thinking.type，通义千问认 enable_thinking。
+/// 不认识的服务大多直接忽略；回 400 的由 send_llm 换成「少想」再换成不带。
+fn thinking_off(body: &mut serde_json::Value) {
+    body["thinking"] = serde_json::json!({"type": "disabled"});
+    body["enable_thinking"] = false.into();
+}
+
+/// 发请求，返回成功的响应。模型因为某个参数回 400 时去掉它再发，不用用户先去设置里改：
+/// - temperature：只接受默认温度的模型（Kimi 只认 1）
+/// - 关思考的参数：关不掉思考的模型（MiniMax-M3.1 要求 adaptive thinking）改请它少想（reasoning_effort=low），
+///   这个也不认就什么都不带，用模型自己的默认
 fn send_llm(
     cfg: &LlmConfig,
     mut body: serde_json::Value,
@@ -431,9 +533,20 @@ fn send_llm(
         tr(&format!("连不上大模型（{url}）：{e}"), &format!("Couldn't reach the language model ({url}): {e}")).into()
     };
     let mut resp = send(&body).map_err(unreachable)?;
-    if resp.status() == reqwest::StatusCode::BAD_REQUEST {
+    // 每次去掉一个参数，最多试 temperature、关思考、少想三次
+    for _ in 0..3 {
+        if resp.status() != reqwest::StatusCode::BAD_REQUEST {
+            break;
+        }
         let text = resp.text().unwrap_or_default();
-        if !text.to_ascii_lowercase().contains("temperature") || body.as_object_mut().and_then(|b| b.remove("temperature")).is_none() {
+        let lower = text.to_ascii_lowercase();
+        let b = body.as_object_mut().expect("请求体是对象");
+        let mentions = |words: &[&str]| words.iter().any(|w| lower.contains(w));
+        if mentions(&["temperature"]) && b.remove("temperature").is_some() {
+        } else if mentions(&["thinking", "reasoning"]) && (b.remove("thinking").is_some() | b.remove("enable_thinking").is_some()) {
+            b.insert("reasoning_effort".into(), "low".into());
+        } else if mentions(&["reasoning", "effort"]) && b.remove("reasoning_effort").is_some() {
+        } else {
             return Err(http_error(reqwest::StatusCode::BAD_REQUEST, &text));
         }
         resp = send(&body).map_err(unreachable)?;
@@ -453,9 +566,61 @@ pub fn chat(
     system: &str,
     prompt: &str,
     think: bool,
+    on_token: impl FnMut(&str),
+    on_think: impl FnMut(usize),
+) -> Result<String, String> {
+    chat_once(cfg, system, prompt, think, on_token, on_think).map_err(|f| f.message)
+}
+
+/// 连接中途断了时最多再请求几次
+const RETRIES: u32 = 2;
+const RETRY_PAUSE: Duration = if cfg!(test) { Duration::from_millis(10) } else { Duration::from_secs(3) };
+
+/// 生成纪要用的 chat：连接中途断了就从头再要一遍。
+/// 手机上最常见的是生成时锁屏或切走，iOS 挂起 App 后收回网络连接，回到前台读到 Connection reset；
+/// 网络切换、中转服务掐断长连接也一样。重试前调 `on_retry`，让界面清掉已经显示的半截正文。
+#[allow(clippy::too_many_arguments)]
+fn chat_retry(
+    cfg: &LlmConfig,
+    system: &str,
+    prompt: &str,
+    think: bool,
+    stage: &str,
+    on_token: &mut dyn FnMut(&str),
+    on_think: &mut dyn FnMut(usize),
+    on_retry: &mut dyn FnMut(&str),
+) -> Result<String, String> {
+    let mut attempt = 0;
+    loop {
+        match chat_once(cfg, system, prompt, think, &mut *on_token, &mut *on_think) {
+            Ok(text) => return Ok(text),
+            Err(f) if f.dropped && attempt < RETRIES => {
+                attempt += 1;
+                // 接在原阶段文字后面：界面靠「分段提炼 2/5」「合并成纪要」算进度
+                let note = tr(&format!("连接断了，正在重试（{attempt}/{RETRIES}）"), &format!("Connection dropped, retrying ({attempt}/{RETRIES})")).to_string();
+                on_retry(&if stage.is_empty() { note } else { format!("{stage} · {note}") });
+                std::thread::sleep(RETRY_PAUSE * attempt);
+            }
+            Err(f) if f.dropped => {
+                let hint = tr(
+                    "（重试后仍然断开。手机上生成纪要时请留在 App 里、别锁屏；网络切换也会断开。可以稍后重新生成。）",
+                    " (Still dropped after retrying. On iPhone, stay in the app and keep the screen on while minutes are generated; switching networks also drops the connection. You can generate again later.)",
+                );
+                return Err(format!("{}{hint}", f.message));
+            }
+            Err(f) => return Err(f.message),
+        }
+    }
+}
+
+fn chat_once(
+    cfg: &LlmConfig,
+    system: &str,
+    prompt: &str,
+    think: bool,
     mut on_token: impl FnMut(&str),
     mut on_think: impl FnMut(usize),
-) -> Result<String, String> {
+) -> Result<String, Failure> {
     if cfg.api == "anthropic" {
         return chat_anthropic(cfg, system, prompt, on_token, on_think);
     }
@@ -478,9 +643,13 @@ pub fn chat(
         "temperature": temperature(cfg),
         "stream": true,
     });
-    if !think && local {
-        // Ollama 的兼容接口用 reasoning_effort=none 关掉 Qwen3 等模型的思考；远程接口未必认这个值，只对本地生效
-        body["reasoning_effort"] = "none".into();
+    if !(think && cfg.think) {
+        if local {
+            // Ollama 的兼容接口用 reasoning_effort=none 关掉 Qwen3 等模型的思考
+            body["reasoning_effort"] = "none".into();
+        } else {
+            thinking_off(&mut body);
+        }
     }
     let client = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(20))
@@ -492,46 +661,71 @@ pub fn chat(
     let mut raw = String::new();
     let mut shown = 0;
     let mut thought = 0usize;
+    let mut think_tail = String::new();
+    let mut next_think_check = 512usize;
+    let mut raw_chars = 0usize;
+    let mut next_repeat_check = 512usize;
+    let mut complete = false;
     for line in BufReader::new(resp).lines() {
-        let line = line.map_err(|e| {
-            tr(
-                &format!("读取大模型输出中断：{e}"),
-                &format!("Lost the connection while reading the model's output: {e}"),
-            )
-            .to_string()
-        })?;
+        let line = line.map_err(stream_read_error)?;
         let Some(data) = line.strip_prefix("data:").map(str::trim) else {
             continue;
         };
         if data == "[DONE]" {
+            complete = true;
             break;
         }
         let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
             continue;
         };
+        if let Some(error) = v.get("error") {
+            let message: String = error["message"].as_str().unwrap_or("stream error").chars().take(300).collect();
+            return Err(tr(&format!("大模型返回错误：{message}"), &format!("The language model returned an error: {message}")).into());
+        }
+        let reason = v["choices"][0]["finish_reason"].as_str();
         let d = &v["choices"][0]["delta"];
         if let Some(r) = d["reasoning_content"].as_str().or_else(|| d["reasoning"].as_str()) {
             if !r.is_empty() {
                 thought += r.chars().count();
+                check_stream_size(raw_chars, thought)?;
+                push_think_tail(&mut think_tail, r);
+                if thought >= next_think_check {
+                    next_think_check = thought + 512;
+                    if repeated_tail(&think_tail) {
+                        return Err(tr("大模型思考时一直在重复同一段，已停止生成。可以重试，或换用不深度思考的模型。", "The model kept repeating itself while thinking; generation was stopped. Retry, or choose a model without deep thinking.").into());
+                    }
+                }
                 on_think(thought);
             }
         }
-        let Some(delta) = d["content"].as_str() else {
-            continue;
-        };
-        if delta.is_empty() {
-            continue;
+        if let Some(delta) = d["content"].as_str().filter(|t| !t.is_empty()) {
+            raw_chars += delta.chars().count();
+            check_stream_size(raw_chars, thought)?;
+            raw.push_str(delta);
+            let visible = strip_think(&raw, true);
+            if visible.chars().count() > MAX_MINUTES_CHARS {
+                return Err(tr("纪要正文异常过长，已停止生成。", "The minutes grew beyond the output limit; generation was stopped.").into());
+            }
+            if visible.len() > shown {
+                on_token(&visible[shown..]);
+                shown = visible.len();
+            } else if shown == 0 && raw.trim_start().starts_with("<think>") {
+                on_think(thought + raw_chars);
+            }
+            if raw_chars >= next_repeat_check {
+                next_repeat_check = raw_chars + 512;
+                if repeated_tail(&raw) {
+                    return Err(tr("模型持续重复同一段内容，已停止生成。", "The model kept repeating the same passage; generation was stopped.").into());
+                }
+            }
         }
-        raw.push_str(delta);
-        let visible = strip_think(&raw, true);
-        if visible.len() > shown {
-            on_token(&visible[shown..]);
-            shown = visible.len();
-        } else if shown == 0 && raw.trim_start().starts_with("<think>") {
-            on_think(thought + raw.chars().count());
+        if let Some(reason) = reason {
+            finish_reason(reason)?;
+            complete = true;
+            break;
         }
     }
-    Ok(strip_think(&raw, false).trim().to_string())
+    completed_text(&raw, complete)
 }
 
 /// Anthropic 接口的根地址：用户填 https://api.anthropic.com 或 …/v1 都行，统一成以 /v1 结尾
@@ -551,6 +745,7 @@ pub enum AnthropicEvent {
     Thinking(usize),
     Error(String),
     Stop,
+    Finish(String),
     Other,
 }
 
@@ -563,6 +758,7 @@ pub fn parse_anthropic_event(data: &str) -> AnthropicEvent {
             _ => AnthropicEvent::Other,
         },
         Some("error") => AnthropicEvent::Error(v["error"]["message"].as_str().unwrap_or("unknown error").to_string()),
+        Some("message_delta") => v["delta"]["stop_reason"].as_str().map(|r| AnthropicEvent::Finish(r.into())).unwrap_or(AnthropicEvent::Other),
         Some("message_stop") => AnthropicEvent::Stop,
         _ => AnthropicEvent::Other,
     }
@@ -575,7 +771,7 @@ fn chat_anthropic(
     prompt: &str,
     mut on_token: impl FnMut(&str),
     mut on_think: impl FnMut(usize),
-) -> Result<String, String> {
+) -> Result<String, Failure> {
     if cfg.api_key.is_empty() {
         return Err(tr(
             "没有配置大模型的 API Key：在设置里填写",
@@ -603,19 +799,27 @@ fn chat_anthropic(
     let mut raw = String::new();
     let mut shown = 0;
     let mut thought = 0usize;
+    let mut raw_chars = 0usize;
+    let mut next_repeat_check = 512usize;
+    let mut complete = false;
     for line in BufReader::new(resp).lines() {
-        let line = line.map_err(|e| {
-            tr(
-                &format!("读取大模型输出中断：{e}"),
-                &format!("Lost the connection while reading the model's output: {e}"),
-            )
-            .to_string()
-        })?;
+        let line = line.map_err(stream_read_error)?;
         let Some(data) = line.strip_prefix("data:").map(str::trim) else { continue };
         match parse_anthropic_event(data) {
             AnthropicEvent::Text(t) if !t.is_empty() => {
+                raw_chars += t.chars().count();
+                check_stream_size(raw_chars, thought)?;
                 raw.push_str(&t);
                 let visible = strip_think(&raw, true);
+                if visible.chars().count() > MAX_MINUTES_CHARS {
+                    return Err(tr("纪要正文异常过长，已停止生成。", "The minutes grew beyond the output limit; generation was stopped.").into());
+                }
+                if raw_chars >= next_repeat_check {
+                    next_repeat_check = raw_chars + 512;
+                    if repeated_tail(&raw) {
+                        return Err(tr("模型持续重复同一段内容，已停止生成。", "The model kept repeating the same passage; generation was stopped.").into());
+                    }
+                }
                 if visible.len() > shown {
                     on_token(&visible[shown..]);
                     shown = visible.len();
@@ -623,16 +827,18 @@ fn chat_anthropic(
             }
             AnthropicEvent::Thinking(n) => {
                 thought += n;
+                check_stream_size(raw_chars, thought)?;
                 on_think(thought);
             }
             AnthropicEvent::Error(m) => {
                 return Err(tr(&format!("大模型返回错误：{m}"), &format!("The language model returned an error: {m}")).into())
             }
-            AnthropicEvent::Stop => break,
+            AnthropicEvent::Finish(reason) => { finish_reason(&reason)?; complete = true; }
+            AnthropicEvent::Stop => { complete = true; break; }
             _ => {}
         }
     }
-    Ok(strip_think(&raw, false).trim().to_string())
+    completed_text(&raw, complete)
 }
 
 pub fn split_chunks(lines: &[&str], max_chars: usize) -> Vec<String> {
@@ -697,14 +903,17 @@ pub fn summarize(
         .replace("{glossary}", &gl)
         .replace("{translate}", translate);
 
+    let Hooks { on_token, on_stage, on_think } = hooks;
     let body = if text.chars().count() <= max_chars {
-        chat(
+        chat_retry(
             cfg,
             pr.system,
             &minutes_prompt.replace("{transcript}", &text),
             true,
-            hooks.on_token,
-            hooks.on_think,
+            "",
+            on_token,
+            on_think,
+            on_stage,
         )?
     } else {
         let lines: Vec<&str> = text.lines().collect();
@@ -712,7 +921,8 @@ pub fn summarize(
         let mut notes = Vec::new();
         for (i, chunk) in chunks.iter().enumerate() {
             let (k, n) = (i + 1, chunks.len());
-            (hooks.on_stage)(tr_stage(k, n).as_str());
+            let stage = tr_stage(k, n);
+            on_stage(&stage);
             let p = pr
                 .chunk
                 .replace("{index}", &k.to_string())
@@ -726,9 +936,10 @@ pub fn summarize(
                 Lang::Zh => format!("### 第 {k} 段"),
                 Lang::En => format!("### Part {k}"),
             };
-            notes.push(format!("{head}\n{}", chat(cfg, pr.system, &p, false, |_| {}, |_| {})?));
+            notes.push(format!("{head}\n{}", chat_retry(cfg, pr.system, &p, false, &stage, &mut |_| {}, &mut |_| {}, on_stage)?));
         }
-        (hooks.on_stage)(i18n::tr("合并成纪要", "Merging into minutes"));
+        let merging = i18n::tr("合并成纪要", "Merging into minutes");
+        on_stage(merging);
         let instructions = minutes_prompt
             .split(pr.transcript_marker)
             .next()
@@ -738,7 +949,7 @@ pub fn summarize(
             .reduce
             .replace("{instructions}", &instructions)
             .replace("{notes}", &notes.join("\n\n"));
-        chat(cfg, pr.system, &p, true, hooks.on_token, hooks.on_think)?
+        chat_retry(cfg, pr.system, &p, true, merging, on_token, on_think, on_stage)?
     };
     Ok(with_meta(&body, tr, &day, lang))
 }
@@ -851,6 +1062,198 @@ mod tests {
         let (url, server) = fixture(vec![(400, "bad temperature"), (400, "still bad")]);
         assert!(send_to(&url, &LlmConfig::default()).unwrap_err().contains("still bad"));
         assert_eq!(server.join().unwrap().len(), 2);
+    }
+
+    fn send_thinking_off(url: &str) -> Result<String, String> {
+        let client = reqwest::blocking::Client::new();
+        let mut body = serde_json::json!({"model": "m", "temperature": 0.2});
+        thinking_off(&mut body);
+        send_llm(&LlmConfig::default(), body, |b| client.post(url).json(b).send()).map(|r| r.text().unwrap())
+    }
+
+    #[test]
+    fn thinking_off_falls_back_to_thinking_less_then_to_the_default() {
+        // 认 thinking.type 的服务（DeepSeek、Kimi、GLM、豆包）一次就成
+        let (url, server) = fixture(vec![(200, "ok")]);
+        send_thinking_off(&url).unwrap();
+        let first = &server.join().unwrap()[0];
+        assert_eq!((first["thinking"]["type"].as_str(), first["enable_thinking"].as_bool()), (Some("disabled"), Some(false)));
+
+        // MiniMax-M3.1 关不掉思考（实测的报错原文）：改请它少想
+        let minimax = r#"{"type":"error","error":{"type":"bad_request_error","message":"invalid params, model \"MiniMax-M3.1-Flash\" requires adaptive thinking; thinking.type=\"disabled\" (including reasoning.effort=none) is not allowed (2013)"}}"#;
+        let (url, server) = fixture(vec![(400, minimax), (200, "ok")]);
+        assert_eq!(send_thinking_off(&url).unwrap(), "ok");
+        let bodies = server.join().unwrap();
+        assert!(bodies[1].get("thinking").is_none() && bodies[1].get("enable_thinking").is_none());
+        assert_eq!((bodies[1]["reasoning_effort"].as_str(), bodies[1]["temperature"].as_f64()), (Some("low"), Some(0.2)));
+
+        // 连 reasoning_effort 也不认：什么都不带，用模型的默认
+        let (url, server) = fixture(vec![(400, "Unrecognized request argument supplied: thinking"), (400, "Unsupported parameter: 'reasoning_effort'"), (200, "ok")]);
+        assert_eq!(send_thinking_off(&url).unwrap(), "ok");
+        let bodies = server.join().unwrap();
+        assert!(bodies[2].get("reasoning_effort").is_none() && bodies[2].get("thinking").is_none());
+
+        // 温度和思考都不认（Kimi 推理模型）：一个一个去掉
+        let (url, server) = fixture(vec![(400, "invalid temperature"), (400, "thinking is not supported"), (200, "ok")]);
+        assert_eq!(send_thinking_off(&url).unwrap(), "ok");
+        let bodies = server.join().unwrap();
+        assert!(bodies[2].get("temperature").is_none() && bodies[2].get("thinking").is_none());
+    }
+
+    fn fixture_chat(events: String) -> (Result<String, String>, String) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+          // The first local request probes Ollama; the second reads the completion stream.
+          for events in [String::from("{}"), events] {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut length = 0usize;
+            loop {
+                let mut header = String::new();
+                reader.read_line(&mut header).unwrap();
+                if header == "\r\n" { break; }
+                if let Some(value) = header.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", events.len(), events).unwrap();
+          }
+        });
+        let cfg = LlmConfig { base_url: format!("http://{addr}"), api_key: "fixture".into(), model: "fixture".into(), api: "openai".into(), temperature: None, think: false };
+        let mut partial = String::new();
+        let result = chat(&cfg, "test", "test", false, |text| partial.push_str(text), |_| {});
+        server.join().unwrap();
+        (result, partial)
+    }
+
+    /// 本地假模型：依次回答 `bodies`（本机地址每次请求前都会先探一下 Ollama，所以探测和正文交替出现）
+    fn fixture_server(bodies: Vec<String>) -> (LlmConfig, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for body in bodies {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut length = 0usize;
+                loop {
+                    let mut header = String::new();
+                    reader.read_line(&mut header).unwrap();
+                    if header == "\r\n" { break; }
+                    if let Some(value) = header.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+                let mut buf = vec![0; length];
+                reader.read_exact(&mut buf).unwrap();
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+            }
+        });
+        let cfg = LlmConfig { base_url: format!("http://{addr}"), api_key: "fixture".into(), model: "fixture".into(), api: "openai".into(), temperature: None, think: false };
+        (cfg, server)
+    }
+
+    #[test]
+    fn dropped_stream_is_retried_and_the_half_text_cleared() {
+        let delta = |t: &str| format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"{t}\"}}}}]}}\n\n");
+        let probe = String::from("{}");
+        // 第一次只写了半截就断了，第二次完整
+        let (cfg, server) = fixture_server(vec![probe.clone(), delta("半截"), probe, format!("{}data: [DONE]\n\n", delta("完整纪要"))]);
+        let shown = std::cell::RefCell::new(String::new());
+        let mut retries = Vec::new();
+        let result = chat_retry(
+            &cfg,
+            "test",
+            "test",
+            false,
+            "合并成纪要",
+            &mut |t| shown.borrow_mut().push_str(t),
+            &mut |_| {},
+            &mut |stage| {
+                retries.push(stage.to_string());
+                shown.borrow_mut().clear();
+            },
+        );
+        server.join().unwrap();
+        assert_eq!(result.unwrap(), "完整纪要");
+        assert_eq!(retries, ["合并成纪要 · 连接断了，正在重试（1/2）"]);
+        assert_eq!(*shown.borrow(), "完整纪要");
+
+        // 一直断：重试 RETRIES 次后报错，并说明怎么避免
+        let mut bodies = Vec::new();
+        for _ in 0..=RETRIES {
+            bodies.extend([String::from("{}"), delta("半截")]);
+        }
+        let (cfg, server) = fixture_server(bodies);
+        let mut retries = 0;
+        let result = chat_retry(&cfg, "test", "test", false, "", &mut |_| {}, &mut |_| {}, &mut |_| retries += 1);
+        server.join().unwrap();
+        assert_eq!(retries, RETRIES);
+        assert!(result.unwrap_err().contains("重试后仍然断开"));
+
+        // 模型明确报错（不是断线）不重试
+        let (cfg, server) = fixture_server(vec![String::from("{}"), "data: {\"error\":{\"message\":\"quota\"}}\n\n".into()]);
+        let mut retries = 0;
+        let result = chat_retry(&cfg, "test", "test", false, "", &mut |_| {}, &mut |_| {}, &mut |_| retries += 1);
+        server.join().unwrap();
+        assert_eq!(retries, 0);
+        assert!(result.unwrap_err().contains("quota"));
+    }
+
+    #[test]
+    fn stream_truncation_keeps_partial_but_never_returns_success() {
+        let delta = "data: {\"choices\":[{\"delta\":{\"content\":\"草稿正文\"}}]}\n\n";
+        let (truncated, partial) = fixture_chat(delta.into());
+        assert!(truncated.is_err());
+        assert_eq!(partial, "草稿正文");
+        let (limited, partial) = fixture_chat(format!("{delta}data: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"length\"}}]}}\n\n"));
+        assert!(limited.is_err());
+        assert_eq!(partial, "草稿正文");
+        let (complete, _) = fixture_chat(format!("{delta}data: [DONE]\n\n"));
+        assert_eq!(complete.unwrap(), "草稿正文");
+    }
+
+    fn reasoning_events(parts: impl Iterator<Item = String>) -> String {
+        parts.map(|r| format!("data: {}\n\n", serde_json::json!({"choices": [{"delta": {"reasoning_content": r}}]}))).collect()
+    }
+
+    #[test]
+    fn long_thinking_on_a_long_meeting_is_not_cut_off() {
+        // 7 万字各不相同的思考（比 MAX_STREAM_CHARS 多），然后才写正文
+        let thinking = reasoning_events((0..2000).map(|i| format!("核对第{i}条发言的时间戳{}与说话人，", i * 7 % 1000)));
+        let done = r#"data: {"choices":[{"delta":{"content":"纪要正文"},"finish_reason":"stop"}]}"#;
+        let (result, _) = fixture_chat(format!("{thinking}{done}\n\n"));
+        assert_eq!(result.unwrap(), "纪要正文");
+    }
+
+    #[test]
+    fn thinking_stuck_in_a_loop_is_stopped() {
+        let thinking = reasoning_events(std::iter::repeat_n("我再检查一遍格式要求：标题、一句话总结、议题、决议、待办、风险。".to_string(), 400));
+        let (result, _) = fixture_chat(format!("{thinking}data: [DONE]\n\n"));
+        assert!(result.unwrap_err().contains("重复"));
+    }
+
+    #[test]
+    fn stream_limits_reject_runaway_and_truncation() {
+        assert!(check_stream_size(10_000, 20_000).is_ok());
+        // 长会议 + 推理模型：思考 5.9 万字、正文 5 千字是正常的（实测 MiniMax-M3.1-Flash）
+        assert!(check_stream_size(5_000, 59_000).is_ok());
+        assert!(check_stream_size(5_000, MAX_THINK_CHARS + 1).is_err());
+        assert!(check_stream_size(MAX_STREAM_CHARS + 1, 0).is_err());
+        assert!(repeated_tail(&"这是模型异常重复的内容。".repeat(256)));
+        assert!(!repeated_tail(&"正常纪要的一段。".repeat(3)));
+        assert!(finish_reason("length").is_err());
+        assert!(finish_reason("max_tokens").is_err());
+        assert!(finish_reason("stop").is_ok());
+        assert!(completed_text("未完成正文", false).is_err());
+        assert!(completed_text("<think>想一想</think>", true).is_err());
+        assert_eq!(completed_text("# 完整纪要", true).unwrap(), "# 完整纪要");
+        assert_eq!(parse_anthropic_event(r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"}}"#), AnthropicEvent::Finish("max_tokens".into()));
     }
 
     #[test]

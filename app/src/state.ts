@@ -19,7 +19,7 @@ export const S: {
   detail: null,
 };
 
-const BUSY = new Set<JobState>(["recording", "saving", "finalizing", "loading", "transcribing", "summarizing", "downloading"]);
+const BUSY = new Set<JobState>(["recording", "saving", "finalizing", "loading", "transcribing", "summarizing", "downloading", "merging"]);
 export const isBusy = (j: Job | undefined): boolean => !!j && BUSY.has(j.state);
 
 const LABELS: Partial<Record<JobState, [string, string]>> = {
@@ -29,6 +29,7 @@ const LABELS: Partial<Record<JobState, [string, string]>> = {
   transcribing: ["正在转写", "Transcribing"],
   summarizing: ["正在生成纪要", "Writing minutes"],
   downloading: ["下载识别模型", "Downloading speech model"],
+  merging: ["正在合并", "Merging"],
 };
 /** 桌面版还没下载识别模型（Python 版会在首次转写时自动下载，不用这个判断）。 */
 export const needsModels = (): boolean => !!S.env?.models_downloadable && !S.env.model_cached;
@@ -45,7 +46,8 @@ export const jobOf = (meeting: string): Job | undefined => S.jobs.find((j) => j.
 export function jobTitle(j: Job): string {
   if (j.kind === "update") return t("下载新版 Tingo", "Downloading Tingo update");
   if (j.kind === "models") return `${isBusy(j) ? t("下载识别模型", "Downloading speech model") : t("识别模型", "Speech model")}${j.meeting && j.meeting !== "paraformer" ? ` · ${j.meeting}` : ""}`;
-  return (j.meeting ?? "").replace(/^\d{4}-\d{2}-\d{2}_\d{4}_/, "") || t("会议", "Meeting");
+  const known = S.meetings.find((m) => m.id === j.meeting)?.title;
+  return known || (j.meeting ?? "").replace(/^\d{4}-\d{2}-\d{2}_\d{4}_/, "") || t("会议", "Meeting");
 }
 
 /* ---------- 纪要生成进度 ----------
@@ -74,6 +76,7 @@ export function minutesProgress(j: Job): MinutesProgress {
     const h = m[1];
     const i = Math.max(
       SECTIONS_ZH.findIndex((x) => h.startsWith(x)),
+      ["会议概述", "议题讨论", "明确决议", "待办", "未决问题"].findIndex(x => h.startsWith(x)),
       SECTIONS_EN.findIndex((x) => h.startsWith(x)),
     );
     if (i > section) section = i;
@@ -103,6 +106,8 @@ export function progressOf(j: Job): number {
     return m ? Number(m[1]) / Number(m[2]) : 0;
   }
   if (j.kind === "summarize") return minutesProgress(j).value;
+  // 合并会议：接录音占前一半；有的段没转写时后一半是整段重新转写
+  if (j.kind === "merge") return j.state === "merging" ? 0.3 : j.state === "transcribing" ? 0.5 + 0.5 * pct(j.stage) : 0.5;
   // 录音结束后、导入的录音：转写占前一半，纪要占后一半（边录边转的话转写早就做完了，只剩最后一段）
   const live = j.kind === "record";
   switch (j.state) {
@@ -124,10 +129,15 @@ export function progressOf(j: Job): number {
 /** 一句话说清任务现在在干什么 */
 export function jobDetail(j: Job): string {
   if (j.state === "error") return j.error || t("没有完成", "Didn't finish");
-  if (j.state === "done") return j.kind === "models" || j.kind === "update" ? t("下载完成", "Downloaded") : t("纪要已生成", "Minutes ready");
+  if (j.state === "done") return j.kind === "models" || j.kind === "update" ? t("下载完成", "Downloaded") : j.kind === "merge" ? t("已合并", "Merged") : t("纪要已生成", "Minutes ready");
+  if (j.state === "merging") return j.stage || stateLabel(j.state);
   if (j.kind === "models" || j.kind === "update") return j.stage || t("准备下载…", "Starting download…");
   if (j.state === "transcribing") return `${t("正在转写", "Transcribing")}${j.stage ? ` ${j.stage}` : ""}`;
+  if (j.local && j.state === "summarizing") return `MiniCPM · ${j.stage || "正在生成纪要"} · ${Math.floor(j.elapsed ?? 0)}秒`;
   if (j.state === "summarizing") {
+    // 和大模型的连接中途断了，引擎正在从头重新要（阶段文字是「原阶段 · 连接断了，正在重试（1/2）」）
+    const retry = /(连接断了.*|Connection dropped.*)$/.exec(j.stage ?? "");
+    if (retry) return retry[1];
     const p = minutesProgress(j);
     if (p.chunk) return t(`长会议分段提炼 ${p.chunk[0]}/${p.chunk[1]}`, `Long meeting: summarizing part ${p.chunk[0]}/${p.chunk[1]}`);
     if (p.section < 0)

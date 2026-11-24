@@ -25,7 +25,7 @@ use crate::chunked::{transcribe_samples, wav_path, LiveTranscriber};
 use crate::config::{self, Config};
 use crate::i18n::{self, tr, Lang};
 use crate::meetings::{self, AUDIO, MINUTES, TRANSCRIPT_JSON};
-use crate::{fishbone, obsidian};
+use crate::{fishbone, live_minutes, obsidian};
 use crate::record::{self, Recorder};
 use crate::summarize::{self, Hooks};
 use crate::transcript::{fmt_ts, Transcript};
@@ -60,6 +60,15 @@ pub struct Job {
     pub thinking: u64,
     /// 结束时间；结束后用时不再增长
     pub finished_at: f64,
+    /// 合并任务：正在被合并的那几场会议。合并完它们会被移走，期间不能改名、删除、重新生成纪要
+    pub merging: Vec<String>,
+}
+
+fn write_minutes_draft(dir: &Path, text: &str) -> std::io::Result<()> {
+    if text.trim().is_empty() { return Ok(()); }
+    let tmp = dir.join("在线纪要草稿.tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(tmp, dir.join("在线纪要草稿.md"))
 }
 
 impl Job {
@@ -87,14 +96,45 @@ struct Live {
     hotwords: Vec<String>,
     /// 最后一次有人说话的时间（录音开始后的秒数）
     last_voice: f64,
+    /// 最后一次有人说话时原始音轨的长度（秒）。截掉末尾的静音按这个算：手机睡着时 `last_voice` 用的
+    /// 时钟不走，录音组件接着录时却按墙钟补了静音，两边会差出一段
+    last_voice_audio: f64,
     /// 没人说话多少分钟后自动结束（0 = 不自动结束），每次检查时按配置更新
     silence_min: u32,
     /// 录音中标记的重点时刻（毫秒），结束时存进会议文件夹的 marks.json
     marks: Vec<u64>,
+    /// 「接着录」：录完以后接到这场会议后面，合成一场
+    continue_of: Option<String>,
+    /// 这次暂停刚被发现时原始音轨的长度（秒）。暂停太久自动结束时截到这里：
+    /// 录音组件每次重启失败前都按墙钟补过静音，不截的话文件末尾会多出最长 30 分钟的静音
+    pause_audio: Option<f64>,
+    /// 边开会边整理的速记版纪要
+    minutes: Arc<Mutex<LiveMinutes>>,
+}
+
+/// 录音中的速记版纪要（见 [`crate::live_minutes`]）
+#[derive(Default)]
+struct LiveMinutes {
+    notes: live_minutes::Notes,
+    /// 每更新一次加一，界面据此判断要不要重画
+    version: u64,
+    /// 设置里开着、也配了大模型
+    enabled: bool,
+    /// 正在等模型回复
+    busy: bool,
+    /// 上一次更新失败的原因；下一次成功就清掉
+    error: Option<String>,
+    /// 已经整理到第几句（实时转写的句子序号）
+    cursor: usize,
+    /// 整理到会议的第几毫秒
+    upto_ms: u64,
+    /// 纪要语言（设置是 auto 时跟着会议说的话定）
+    lang: Option<Lang>,
 }
 
 pub struct AppState {
     opt: Options,
+    auto_minutes: bool,
     root: Mutex<PathBuf>,
     storage_gate: Arc<tokio::sync::RwLock<()>>,
     storage_progress: Mutex<crate::storage::Progress>,
@@ -146,12 +186,15 @@ fn not_found() -> ApiError {
 }
 
 impl AppState {
-    pub fn new(opt: Options) -> Shared {
+    pub fn new(opt: Options) -> Shared { Self::with_auto_minutes(opt, true) }
+
+    fn with_auto_minutes(opt: Options, auto_minutes: bool) -> Shared {
         Arc::new(Self {
             root: Mutex::new(opt.root.clone()),
             storage_gate: Arc::new(tokio::sync::RwLock::new(())),
             storage_progress: Mutex::new(crate::storage::Progress::default()),
             opt,
+            auto_minutes,
             engine: Mutex::new(None),
             engine_lock: Mutex::new(()),
             jobs: Mutex::new(Vec::new()),
@@ -236,7 +279,7 @@ impl AppState {
 
     /// 这场会议有没有进行中的任务（模型下载不算，它的 meeting 字段是模型编号）
     fn meeting_busy(&self, id: &str) -> bool {
-        self.jobs.lock().unwrap().iter().any(|j| j.busy() && j.kind != "models" && j.meeting == id)
+        self.jobs.lock().unwrap().iter().any(|j| j.busy() && j.kind != "models" && (j.meeting == id || j.merging.iter().any(|m| m == id)))
     }
 
     /// 会议文件夹，且这场会议没有进行中的任务（否则 409）
@@ -248,12 +291,17 @@ impl AppState {
         Ok(dir)
     }
 
+    /// 移到系统废纸篓
+    fn trash(&self, path: &Path) -> Result<(), String> {
+        record::trash(&self.opt.recorder_bin, path)
+    }
+
     /// 把一批文件挨个移到废纸篓，返回移走的字节数；遇到失败就停下报错
     fn trash_files(&self, files: &[PathBuf]) -> Result<u64, String> {
         let mut freed = 0;
         for f in files {
             let n = meetings::size_of(f);
-            record::trash(&self.opt.recorder_bin, f)?;
+            self.trash(f)?;
             freed += n;
         }
         Ok(freed)
@@ -263,7 +311,7 @@ impl AppState {
     fn delete_meeting(&self, id: &str) -> ApiResult<u64> {
         let dir = self.idle_folder(id)?;
         let size = meetings::size_of(&dir);
-        record::trash(&self.opt.recorder_bin, &dir).map_err(server_error)?;
+        self.trash(&dir).map_err(server_error)?;
         Ok(size)
     }
 
@@ -283,7 +331,8 @@ impl AppState {
 
     /// 改 meta.json：只改请求体里给了的字段（title 为 null 或空串 = 恢复默认标题），返回更新后的列表项
     fn update_meta(&self, id: &str, body: &Value) -> ApiResult<Value> {
-        let dir = self.folder(id)?;
+        // 录音、转写、生成纪要时这场会议的文件夹还在被写，不和它抢 meta.json
+        let dir = self.idle_folder(id)?;
         let obj = body.as_object().ok_or_else(|| bad(tr("请求格式不对", "Invalid request")))?;
         let mut meta = meetings::read_meta(&dir);
         if let Some(t) = obj.get("title") {
@@ -329,7 +378,7 @@ impl AppState {
             let result = match action {
                 "delete" => self.delete_meeting(id),
                 "delete_audio" => self.delete_audio(id, false),
-                _ => self.folder(id).and_then(|dir| {
+                _ => self.idle_folder(id).and_then(|dir| {
                     let mut meta = meetings::read_meta(&dir);
                     match action {
                         "archive" => meta.archived = true,
@@ -358,7 +407,8 @@ impl AppState {
     fn storage(&self) -> Value {
         let mut v = meetings::storage(&self.root(), |id| self.meeting_busy(id));
         v["models_bytes"] = meetings::size_of(&self.opt.models_dir).into();
-        v["can_change_directory"] = json!(config::env_var("ROOT").is_none());
+        // iOS 只能存在 App 自己的「文稿」里，也没有选文件夹的录音组件
+        v["can_change_directory"] = json!(!cfg!(target_os = "ios") && config::env_var("ROOT").is_none());
         v["changing"] = json!(self.storage_progress.lock().unwrap().active);
         v["free_bytes"] = meetings::free_bytes(&self.root()).into();
         v
@@ -425,6 +475,10 @@ impl AppState {
     /// （转写共用一个识别引擎，在引擎里排队；生成纪要主要等网络）。
     fn start_job(&self, job: Job) -> ApiResult<()> {
         let mut jobs = self.jobs.lock().unwrap();
+        // 已有会议的任务在持锁后再次验证；新录音和导入此时尚未创建目录。
+        if job.kind == "summarize" || (job.kind == "process" && job.state == "loading") {
+            self.folder(&job.meeting)?;
+        }
         let conflict = jobs.iter().filter(|j| j.busy()).find_map(|j| {
             if job.kind == "record" && j.state == "recording" {
                 Some(tr("已经在录音了，先结束这一场", "Already recording. Stop the current one first"))
@@ -434,6 +488,8 @@ impl AppState {
                 Some(tr("已经在下载新版了，等它下完", "The update is already downloading. Wait for it to finish"))
             } else if !job.meeting.is_empty() && job.kind != "models" && j.kind != "models" && j.meeting == job.meeting {
                 Some(busy_msg())
+            } else if j.merging.contains(&job.meeting) || job.merging.iter().any(|m| *m == j.meeting || j.merging.contains(m)) {
+                Some(tr("这场会议正在合并或处理，等它完成", "This meeting is being merged or processed. Wait for it to finish"))
             } else {
                 None
             }
@@ -479,14 +535,22 @@ impl AppState {
                 .collect::<Vec<_>>(),
         );
         self.update(id, |j| j.state = "summarizing".into());
-        let text = summarize::summarize(
+        let mut last_draft: Option<Instant> = None;
+        let result = summarize::summarize(
             tr,
             &cfg.llm,
             meetings::meeting_date(dir),
             &hotwords,
             &cfg.minutes_language,
             Hooks {
-                on_token: &mut |t| self.update(id, |j| j.minutes.push_str(t)),
+                on_token: &mut |t| {
+                    self.update(id, |j| j.minutes.push_str(t));
+                    if last_draft.is_none_or(|at| at.elapsed() >= Duration::from_secs(2)) {
+                        let partial = self.jobs.lock().unwrap().iter().find(|j| j.id == id).map(|j| j.minutes.clone()).unwrap_or_default();
+                        let _ = write_minutes_draft(dir, &partial);
+                        last_draft = Some(Instant::now());
+                    }
+                },
                 on_stage: &mut |s| {
                     self.update(id, |j| {
                         j.stage = s.into();
@@ -496,8 +560,23 @@ impl AppState {
                 },
                 on_think: &mut |n| self.update(id, |j| j.thinking = n as u64),
             },
-        )?;
+        );
+        let text = match result {
+            Ok(text) => text,
+            Err(error) => {
+                let partial = self.jobs.lock().unwrap().iter().find(|j| j.id == id).map(|j| j.minutes.clone()).unwrap_or_default();
+                if !partial.trim().is_empty() {
+                    match write_minutes_draft(dir, &partial) {
+                        Ok(()) => return Err(format!("{error}{}", i18n::tr(" 已生成的正文已保存为草稿，原纪要未覆盖。", " Generated text was saved as a draft; existing minutes were preserved."))),
+                        Err(save_error) => return Err(format!("{error}{}: {save_error}", i18n::tr(" 草稿保存失败", " Could not save the draft"))),
+                    }
+                }
+                return Err(error);
+            }
+        };
+        write_minutes_draft(dir, &text).map_err(|e| e.to_string())?;
         crate::minutes_history::save(dir, &text).map_err(|e| e.to_string())?;
+        let _ = std::fs::remove_file(dir.join("在线纪要草稿.md"));
         self.update(id, |j| j.minutes = text);
         if cfg.obsidian.auto && !cfg.obsidian.vault.trim().is_empty() {
             // 自动存进 Obsidian；失败不影响纪要本身，只提示一下
@@ -518,8 +597,19 @@ impl AppState {
         Ok(())
     }
 
+    /// 原生外壳由用户明确选择在线或离线生成，录音和转写不隐式发送给在线服务。
+    fn run_auto_minutes(&self, id: &str, tr: &Transcript, dir: &Path, extra: &[String]) -> Result<(), String> {
+        if self.auto_minutes { self.run_summarize(id, tr, dir, extra) } else { Ok(()) }
+    }
+
     /// 处理录音文件：解码 → 分段转写 → 存转写 → 生成纪要。
     fn run_process(&self, id: &str, audio_path: &Path, dir: &Path, extra: &[String]) -> Result<(), String> {
+        let tr = self.run_transcribe(id, audio_path, dir)?;
+        self.run_auto_minutes(id, &tr, dir, extra)
+    }
+
+    /// 转写录音文件：解码 → 分段转写 → 存转写。
+    fn run_transcribe(&self, id: &str, audio_path: &Path, dir: &Path) -> Result<Transcript, String> {
         self.update(id, |j| j.state = "loading".into());
         let engine = self.engine()?;
         self.update(id, |j| j.state = "transcribing".into());
@@ -532,7 +622,94 @@ impl AppState {
             return Err(i18n::tr("没有识别出任何语音", "No speech was recognized").into());
         }
         meetings::save_transcript(&tr, dir).map_err(|e| e.to_string())?;
-        self.run_summarize(id, &tr, dir, extra)
+        Ok(tr)
+    }
+
+    /// 合并会议：建好新会议 → 把原来的几场移到「已删除会议」→ 有的段没转写时整段重新转写。
+    /// 返回合并后的转写（没有识别出语音时是错误，但合并本身已经完成）。
+    fn run_merge(&self, id: &str, sources: &[PathBuf], dest: &Path, title: &str) -> Result<Transcript, String> {
+        let transcribed = self.merge_files(id, sources, dest, title)?;
+        self.merged_transcript(id, dest, transcribed)
+    }
+
+    /// 合并的前一半：建好新会议，把原来的几场移到「已删除会议」。出错时什么都没动。
+    /// 返回转写是不是已经拼好了。
+    fn merge_files(&self, id: &str, sources: &[PathBuf], dest: &Path, title: &str) -> Result<bool, String> {
+        let merged = crate::merge::merge(&self.opt.recorder_bin, sources, dest, title, |stage| {
+            self.update(id, |j| j.stage = stage)
+        })?;
+        self.update(id, |j| j.stage.clear());
+        // 接着录留下的中间文件用完了，别带进「已删除会议」
+        for dir in sources {
+            let _ = std::fs::remove_file(dir.join(crate::merge::MIXED_WAV));
+        }
+        // 新会议已经完整，原来的几场可以收走了。收不走的留在原处并说明，不算合并失败
+        let stuck: Vec<String> = sources
+            .iter()
+            .filter(|dir| meetings::move_to_deleted(&self.root(), dir).is_err())
+            .map(|dir| meetings::summary(dir).title)
+            .collect();
+        if !stuck.is_empty() {
+            let names = stuck.join(i18n::tr("、", ", "));
+            self.update(id, |j| {
+                j.notice = i18n::tr(
+                    &format!("没能把原来的会议移到「已删除会议」：{names}，可以手动删除"),
+                    &format!("Couldn't move the original meetings to deleted meetings: {names}. You can delete them yourself"),
+                )
+                .to_string()
+            });
+        }
+        Ok(merged.transcribed)
+    }
+
+    /// 合并的后一半：拿到合并后的转写；有的段没转写时对合并后的录音整段转写。
+    fn merged_transcript(&self, id: &str, dest: &Path, transcribed: bool) -> Result<Transcript, String> {
+        if transcribed {
+            Transcript::load(&dest.join(TRANSCRIPT_JSON)).map_err(|e| e.to_string())
+        } else {
+            self.run_transcribe(id, &dest.join(AUDIO), dest)
+        }
+    }
+
+    /// 「接着录」结束：把刚录完的这一段（`part`，转写是 `part_tr`，还没转写时为 None）接到原来那场后面合成一场，
+    /// 再按合成后的内容生成纪要。接不上（原来那场不见了、磁盘满了）时这一段照常单独保存、单独出纪要，并说明原因。
+    fn finish_continued(&self, id: &str, orig: &str, part: &Path, part_tr: Option<&Transcript>, extra: &[String]) -> Result<(), String> {
+        let joined = self
+            .folder(orig)
+            .map_err(|_| i18n::tr("原来那场会议找不到了", "the original meeting is gone").to_string())
+            .and_then(|orig_dir| {
+                let title = meetings::summary(&orig_dir).title;
+                let dest = meetings::new_folder(&self.root(), &title, meetings::meeting_start(&orig_dir));
+                let transcribed = self.merge_files(id, &[orig_dir, part.to_path_buf()], &dest, &title)?;
+                Ok((dest, transcribed))
+            });
+        match joined {
+            Ok((dest, transcribed)) => {
+                // 原来那场和刚录的这一段都已经收走，任务从这里起跟着合成后的会议
+                let name = dest.file_name().unwrap().to_string_lossy().into_owned();
+                self.update(id, |j| {
+                    j.meeting = name;
+                    j.merging.clear();
+                });
+                let tr = self.merged_transcript(id, &dest, transcribed)?;
+                self.run_auto_minutes(id, &tr, &dest, extra)
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(part.join(crate::merge::MIXED_WAV));
+                self.update(id, |j| {
+                    j.merging.clear();
+                    j.notice = i18n::tr(
+                        &format!("没能接到原来那场后面：{e}。这一段单独保存了，可以在会议列表里手动合并"),
+                        &format!("Couldn't append to the original meeting: {e}. This part was saved on its own — you can merge them from the meeting list"),
+                    )
+                    .to_string()
+                });
+                match part_tr {
+                    Some(tr) => self.run_auto_minutes(id, tr, part, extra),
+                    None => self.run_process(id, &part.join(AUDIO), part, extra),
+                }
+            }
+        }
     }
 }
 
@@ -559,13 +736,16 @@ async fn env(State(s): State<Shared>) -> Json<Value> {
             .unwrap_or(false);
     Json(json!({
         "version": s.opt.version,
+        "platform": if cfg!(target_os = "ios") { "ios" } else { std::env::consts::OS },
         "root": s.root(),
         "ffmpeg": true, // 桌面版不需要 ffmpeg
+        "merge": true,  // 能合并会议、接着录；界面按这个决定显不显示入口（Python 版后端没有）
         "system_audio": system_audio_supported(&s.opt.recorder_bin),
         "model_cached": s.model_paths().base_ready() && s.model_paths().asr_ready(s.model_paths().active()),
         "asr_model": models::catalog().iter().find(|m| m.kind == s.model_paths().active()).map(|m| m.name),
         "models_downloadable": true, // 桌面版：模型在界面里下载（Python 版首次转写时自动下载，没有这个字段）
-        "models_size_mb": models::total_size() / 1_000_000,
+        "models_size_mb": models::total_size(models::Source::Github) / 1_000_000,
+        "models_size_mb_cn": models::total_size(models::Source::Cn) / 1_000_000,
         "model_loaded": s.engine_loaded(),
         "llm_ready": llm_ready,
         "llm_model": cfg.llm.model,
@@ -573,7 +753,7 @@ async fn env(State(s): State<Shared>) -> Json<Value> {
 }
 
 fn system_audio_supported(bin: &Path) -> bool {
-    if !bin.is_file() {
+    if record::native().is_some() || !bin.is_file() {
         return false;
     }
     let out = std::process::Command::new("/usr/bin/sw_vers")
@@ -610,6 +790,8 @@ fn config_json(s: &AppState) -> Value {
         "model": c.llm.model,
         "api": c.llm.api,
         "temperature": c.llm.temperature,
+        "think": c.llm.think,
+        "live_minutes": c.live_minutes,
         "api_key_set": !key.is_empty(),
         "api_key_hint": hint,
         "hotwords": c.hotwords,
@@ -653,6 +835,10 @@ struct ConfigReq {
     api: Option<String>,
     /// 采样温度：0～2 的数，空字符串 = 恢复默认，不传就不改
     temperature: Option<Value>,
+    /// 写纪要时深度思考，不传就不改
+    think: Option<bool>,
+    /// 开会时实时整理纪要，不传就不改
+    live_minutes: Option<bool>,
     /// 自动结束录音：没人说话多少分钟（0–240 的整数，0 = 不自动结束）、会议软件退出时是否结束；不传就不改
     auto_stop_silence_min: Option<Value>,
     auto_stop_app_quit: Option<bool>,
@@ -705,6 +891,12 @@ async fn put_config(State(s): State<Shared>, Json(r): Json<ConfigReq>) -> ApiRes
         if c.llm.temperature.is_some_and(|t| !config::valid_temperature(t)) {
             return Err(bad(tr("温度要填 0～2 之间的数，留空用默认的 0.2", "Temperature must be a number from 0 to 2; leave it empty for the default 0.2")));
         }
+    }
+    if let Some(t) = r.think {
+        c.llm.think = t;
+    }
+    if let Some(l) = r.live_minutes {
+        c.live_minutes = l;
     }
     c.hotwords = r
         .hotwords
@@ -889,6 +1081,7 @@ async fn list_meetings(State(s): State<Shared>) -> Json<Value> {
     Json(json!(meetings::list(&s.root())))
 }
 
+
 fn meeting_json(dir: &Path) -> Value {
     let info = meetings::summary(dir);
     let mut data = serde_json::to_value(&info).unwrap();
@@ -979,7 +1172,8 @@ async fn storage_gate(State(s): State<Shared>, req: Request, next: axum::middlew
         return next.run(req).await;
     }
     let _guard = s.storage_gate.read().await;
-    if !s.config().storage_root.is_empty() && !s.root().is_dir()
+    // 先看目录在不在（一次 stat），不在时才读配置：录音时界面每秒要请求好几次，不必每次都读、解析 config.toml
+    if !s.root().is_dir() && !s.config().storage_root.is_empty()
         && !matches!(path, "/api/storage" | "/api/storage/choose" | "/api/env" | "/api/config" | "/api/jobs" | "/api/job") {
         return bad(tr("存储目录不可用，请连接磁盘或在设置中选择其他目录", "Storage folder unavailable. Connect the disk or choose another folder in Settings")).into_response();
     }
@@ -1053,6 +1247,53 @@ async fn post_cleanup(State(s): State<Shared>, Json(r): Json<Value>) -> ApiResul
         .await
         .map_err(|e| server_error(e.to_string()))?
         .map(Json)
+}
+
+#[derive(Deserialize)]
+struct MergeReq {
+    ids: Vec<String>,
+    /// 合并后的标题；不填用最早那场的
+    #[serde(default)]
+    title: String,
+}
+
+/// 把几场会议合成一场：一场会被打断后录成了几段时用。录音按先后接起来，转写拼接（有的段还没转写就整段重转），
+/// 原来的几场移到「已删除会议」。合成的是一场新会议，纪要要重新生成，这里不替用户调大模型。
+async fn merge_meetings(State(s): State<Shared>, Json(r): Json<MergeReq>) -> ApiResult<Json<Job>> {
+    let mut ids = r.ids.clone();
+    ids.sort();
+    ids.dedup();
+    if ids.len() < 2 {
+        return Err(bad(tr("至少选两场会议才能合并", "Pick at least two meetings to merge")));
+    }
+    let mut sources = Vec::with_capacity(ids.len());
+    for id in &ids {
+        let dir = s.folder(id)?;
+        if meetings::find_audio(&dir).is_none() {
+            let name = meetings::summary(&dir).title;
+            return Err(bad(tr(
+                &format!("「{name}」没有录音，不能合并"),
+                &format!("“{name}” has no recording, so it can't be merged"),
+            )));
+        }
+        sources.push(dir);
+    }
+    // 按开始时间排先后；同一分钟开始的按文件夹名
+    sources.sort_by_key(|d| (meetings::meeting_start(d), d.file_name().map(|n| n.to_os_string())));
+    let title = match r.title.trim() {
+        "" => meetings::summary(&sources[0]).title,
+        t => t.to_string(),
+    };
+    let dest = meetings::new_folder(&s.root(), &title, meetings::meeting_start(&sources[0]));
+    let name = dest.file_name().unwrap().to_string_lossy().into_owned();
+    let mut job = Job::new("merge", &name, "merging");
+    job.merging = sources
+        .iter()
+        .map(|d| d.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    s.start_job(job.clone())?;
+    spawn_job(&s, &job.id, move |st, id| st.run_merge(id, &sources, &dest, &title).map(|_| ()));
+    Ok(Json(job))
 }
 
 /// 播放用的标准类型。按扩展名猜出来的 audio/m4a 不是标准写法，Chrome 照样能放，
@@ -1446,6 +1687,9 @@ struct RecordReq {
     mic: bool,
     #[serde(default)]
     hotwords: Vec<String>,
+    /// 「接着录」：这一段录完以后接到这场会议后面（会议被打断、App 被关掉之后用）
+    #[serde(default)]
+    continue_of: Option<String>,
 }
 
 fn default_title() -> String {
@@ -1465,9 +1709,22 @@ async fn record_start(State(s): State<Shared>, Json(r): Json<RecordReq>) -> ApiR
     }
     let engine = s.engine().map_err(bad)?; // 边录边转需要模型；没下载就先提示下载
     let system = r.system && system_audio_supported(&s.opt.recorder_bin);
+    // 接着录：先确认原来那场还在、有录音可接；用文件夹的本名，后面合并时按它找
+    let continue_of = match r.continue_of.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
+        Some(id) => {
+            let orig = s.folder(id)?;
+            if meetings::find_audio(&orig).is_none() {
+                return Err(bad(tr("这场会议没有录音，没法接着录", "This meeting has no recording to continue")));
+            }
+            Some(orig.file_name().unwrap().to_string_lossy().into_owned())
+        }
+        None => None,
+    };
     let dir = meetings::new_folder(&s.root(), &r.title, chrono::Local::now().naive_local());
     let name = dir.file_name().unwrap().to_string_lossy().into_owned();
     let mut job = Job::new("record", &name, "recording");
+    // 原来那场在录音期间不能删、不能改名、不能另外处理
+    job.merging = continue_of.iter().cloned().collect();
     s.start_job(job.clone())?;
     let recorder = match Recorder::start(&s.opt.recorder_bin, &dir, system, r.mic) {
         Ok(rec) => rec,
@@ -1478,6 +1735,7 @@ async fn record_start(State(s): State<Shared>, Json(r): Json<RecordReq>) -> ApiR
         }
     };
     let live = LiveTranscriber::start(engine, &dir, &recorder.sources);
+    let minutes = Arc::new(Mutex::new(LiveMinutes::default()));
     job.sources = recorder.sources.clone();
     s.update(&job.id, |j| j.sources = job.sources.clone());
     *s.recording.lock().unwrap() = Some(Live {
@@ -1486,15 +1744,21 @@ async fn record_start(State(s): State<Shared>, Json(r): Json<RecordReq>) -> ApiR
         live: Some(live),
         hotwords: r.hotwords,
         last_voice: 0.0,
+        last_voice_audio: 0.0,
         silence_min: s.config().auto_stop_silence_min,
         marks: Vec::new(),
+        continue_of,
+        pause_audio: None,
+        minutes: minutes.clone(),
     });
-    spawn_watcher(&s, job.id.clone(), dir, job.sources.clone());
+    spawn_watcher(&s, job.id.clone(), dir.clone(), job.sources.clone());
+    spawn_live_minutes(&s, job.id.clone(), dir, minutes);
     Ok(Json(job))
 }
 
 /// 录音时每 5 秒检查一次：有没有人说话（任一音轨最近 5 秒够响，或者边录边转出了新的文字）、
 /// 开始时在运行的会议软件是不是都退出了；到了条件就自动结束录音（和点「结束录音」一样）。
+/// 录音暂时停着（麦克风被占用、App 被挂起过）的时间不算"没人说话"；停得太久录音组件不再接着录，也在这里结束。
 fn spawn_watcher(s: &Shared, id: String, dir: PathBuf, sources: Vec<String>) {
     let s = s.clone();
     std::thread::spawn(move || {
@@ -1507,6 +1771,10 @@ fn spawn_watcher(s: &Shared, id: String, dir: PathBuf, sources: Vec<String>) {
             let loud = sources
                 .iter()
                 .any(|src| audio::track_level(&wav_path(&dir, src), window) >= autostop::VOICE_LEVEL);
+            let audio_s = sources
+                .iter()
+                .map(|src| audio::GrowingWav::new(wav_path(&dir, src)).seconds())
+                .fold(0.0, f64::max);
             let apps_quit =
                 cfg.auto_stop_app_quit && !apps.is_empty() && autostop::running_meeting_apps().is_disjoint(&apps);
             let stop = {
@@ -1514,19 +1782,34 @@ fn spawn_watcher(s: &Shared, id: String, dir: PathBuf, sources: Vec<String>) {
                 let Some(live) = rec.as_mut().filter(|l| l.job == id) else { return };
                 let lines = live.live.as_ref().map_or(0, |l| l.line_count());
                 let now = live.recorder.elapsed();
-                if loud || lines > lines_seen {
+                let pause = live.recorder.pause();
+                if pause.is_none() {
+                    live.pause_audio = None;
+                } else if live.pause_audio.is_none() {
+                    live.pause_audio = Some(audio_s);
+                }
+                if pause.is_some() || loud || lines > lines_seen {
                     live.last_voice = now;
+                    live.last_voice_audio = audio_s;
                 }
                 lines_seen = lines;
                 let n = cfg.auto_stop_silence_min;
                 live.silence_min = n;
-                if n > 0 && now - live.last_voice >= n as f64 * 60.0 {
+                if let Some(p) = pause.filter(|p| p.expired) {
+                    let m = p.limit_min();
+                    let notice = tr(
+                        &format!("录音中断超过 {m} 分钟没有恢复，已自动结束（中断前的内容都在）"),
+                        &format!("Recording was interrupted for over {m} minutes and has been stopped — everything before that is kept"),
+                    )
+                    .to_string();
+                    Some((notice, live.pause_audio))
+                } else if n > 0 && now - live.last_voice >= n as f64 * 60.0 {
                     let notice = tr(
                         &format!("{n} 分钟没人说话，已自动结束录音"),
                         &format!("No one spoke for {n} minutes — recording stopped automatically"),
                     )
                     .to_string();
-                    Some((notice, Some(live.last_voice + autostop::KEEP_AFTER_S)))
+                    Some((notice, Some(live.last_voice_audio + autostop::KEEP_AFTER_S)))
                 } else if apps_quit {
                     let notice = tr(
                         "会议软件已退出，已自动结束录音",
@@ -1547,10 +1830,114 @@ fn spawn_watcher(s: &Shared, id: String, dir: PathBuf, sources: Vec<String>) {
     });
 }
 
+/// 配了能用的大模型：填了 Key，或者是本机的 Ollama
+fn llm_configured(cfg: &config::LlmConfig) -> bool {
+    !cfg.api_key.trim().is_empty() || summarize::is_ollama(cfg)
+}
+
+/// 录音时边开会边整理速记版纪要：说够一段话后整理第一次，之后每两分钟把新说的话交给模型。
+/// 录音结束后这个线程自己退出，正式纪要照常用整场转写写。速记版存在会议文件夹的 .live-minutes.md，
+/// 会后写正式纪要失败时还有它可看。
+fn spawn_live_minutes(s: &Shared, id: String, dir: PathBuf, minutes: Arc<Mutex<LiveMinutes>>) {
+    let s = s.clone();
+    std::thread::spawn(move || {
+        let started = Instant::now();
+        let mut last_try: Option<Instant> = None;
+        loop {
+            std::thread::sleep(Duration::from_secs(5));
+            let cfg = s.config();
+            // 每次都看一下：开会中途在设置里关掉、填上 Key 都马上生效
+            let enabled = cfg.live_minutes && llm_configured(&cfg.llm);
+            minutes.lock().unwrap().enabled = enabled;
+            if !enabled {
+                continue;
+            }
+            // 上次没成功（网络抖了一下、模型回的格式不对）半分钟后就再试，成功了才隔两分钟
+            let wait = if minutes.lock().unwrap().error.is_some() { live_minutes::RETRY_S } else { live_minutes::INTERVAL_S };
+            if last_try.is_some_and(|t| t.elapsed().as_secs_f64() < wait) {
+                continue;
+            }
+            let cursor = minutes.lock().unwrap().cursor;
+            let (lines, total) = {
+                let rec = s.recording.lock().unwrap();
+                let Some(live) = rec.as_ref().filter(|l| l.job == id) else { return };
+                live.live.as_ref().map(|l| l.new_lines(cursor)).unwrap_or_default()
+            };
+            let lines: Vec<_> = lines.into_iter().filter(|l| !l.text.trim().is_empty()).collect();
+            let chars: usize = lines.iter().map(|l| l.text.chars().count()).sum();
+            let first = minutes.lock().unwrap().notes.is_empty();
+            // 第一次等说够一段话，或者开会两分钟后有点内容就先整理
+            let need = if !first {
+                live_minutes::MIN_NEW_CHARS
+            } else if started.elapsed().as_secs_f64() >= live_minutes::INTERVAL_S {
+                live_minutes::MIN_NEW_CHARS
+            } else {
+                live_minutes::FIRST_CHARS
+            };
+            if chars < need {
+                continue;
+            }
+            let words: String = lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n");
+            let lang = i18n::resolve(&cfg.minutes_language, &words);
+            let text = live_lines_text(&lines, lang);
+            let upto_ms = lines.last().map_or(0, |l| l.start_ms);
+            let notes = {
+                let mut m = minutes.lock().unwrap();
+                m.busy = true;
+                m.notes.clone()
+            };
+            last_try = Some(Instant::now());
+            let result = live_minutes::update(&cfg.llm, &notes, &text, &cfg.hotwords, lang);
+            // 模型回复时录音可能已经结束了：结果照样记下，正式纪要不受影响
+            let mut m = minutes.lock().unwrap();
+            m.busy = false;
+            match result {
+                Ok(next) => {
+                    let _ = std::fs::write(dir.join(".live-minutes.md"), next.markdown(lang));
+                    m.notes = next;
+                    m.version += 1;
+                    m.cursor = total;
+                    m.upto_ms = upto_ms;
+                    m.lang = Some(lang);
+                    m.error = None;
+                }
+                Err(e) => m.error = Some(e),
+            }
+            drop(m);
+            if s.recording.lock().unwrap().as_ref().filter(|l| l.job == id).is_none() {
+                return;
+            }
+        }
+    });
+}
+
+/// 实时转写的句子排成给模型看的样子：同一人连着说的并成一段，「[分:秒] 说话人1：内容」
+fn live_lines_text(lines: &[crate::chunked::LiveLine], lang: Lang) -> String {
+    let name = |sp: Option<usize>| match sp {
+        Some(n) => lang.pick(&format!("说话人{}", n + 1), &format!("Speaker {}", n + 1)).to_string(),
+        None => lang.pick("说话人", "Speaker").to_string(),
+    };
+    let sep = lang.pick("：", ": ");
+    let mut out: Vec<(Option<usize>, u64, String)> = Vec::new();
+    for l in lines {
+        match out.last_mut() {
+            Some((sp, _, text)) if *sp == l.speaker => {
+                text.push_str(lang.pick("", " "));
+                text.push_str(l.text.trim());
+            }
+            _ => out.push((l.speaker, l.start_ms, l.text.trim().to_string())),
+        }
+    }
+    out.into_iter().map(|(sp, ms, text)| format!("[{}] {}{sep}{text}", fmt_ts(ms), name(sp))).collect::<Vec<_>>().join("\n")
+}
+
 #[derive(Deserialize)]
 struct LiveQuery {
     #[serde(default)]
     from: usize,
+    /// 界面手上的速记版是第几版；和现在的一样就不再传正文
+    #[serde(default)]
+    notes_v: Option<u64>,
     /// 界面手里的说话人版本；过时了就从头给（录音中会整场重新聚类说话人）
     #[serde(default)]
     rev: u64,
@@ -1568,7 +1955,16 @@ async fn live_lines(State(s): State<Shared>, Query(q): Query<LiveQuery>) -> ApiR
         "rev": rev,
         "lines": lines.into_iter().map(|l| json!({"start_ms": l.start_ms, "speaker": l.speaker, "text": l.text})).collect::<Vec<_>>(),
         "marks": live.marks,
+        "notes": live_notes_json(&live.minutes.lock().unwrap(), q.notes_v),
     })))
+}
+
+fn live_notes_json(m: &LiveMinutes, have: Option<u64>) -> Value {
+    let mut v = json!({"v": m.version, "enabled": m.enabled, "busy": m.busy, "error": m.error, "upto_ms": m.upto_ms});
+    if m.version > 0 && have != Some(m.version) {
+        v["markdown"] = m.notes.markdown(m.lang.unwrap_or(Lang::Zh)).into();
+    }
+    v
 }
 
 #[derive(Deserialize)]
@@ -1644,11 +2040,15 @@ fn stop_recording(s: &Shared, only: Option<&str>, notice: Option<String>, keep_s
                     t.tail_s, t.segments, t.cluster_s, t.live_lag_avg_s, t.live_lag_max_s
                 );
                 meetings::save_transcript(&tr, &dir).map_err(|e| e.to_string())?;
+                if let Some(orig) = &live.continue_of {
+                    record::mixdown_keeping_wav(&dir, &final_audio)?;
+                    return st.finish_continued(id, orig, &dir, Some(&tr), &live.hotwords);
+                }
                 // 合成录音和生成纪要同时进行
                 let mix_dir = dir.clone();
                 let mixer =
                     std::thread::spawn(move || record::mixdown(&mix_dir, &mix_dir.join(AUDIO)));
-                let summary = st.run_summarize(id, &tr, &dir, &live.hotwords);
+                let summary = st.run_auto_minutes(id, &tr, &dir, &live.hotwords);
                 let mixed = mixer
                     .join()
                     .map_err(|_| i18n::tr("合成录音线程异常", "The audio mixing thread crashed").to_string())?;
@@ -1663,7 +2063,18 @@ fn stop_recording(s: &Shared, only: Option<&str>, notice: Option<String>, keep_s
             }
             // 边录边转出错或什么都没识别到：合成录音后整段重转
             _ => {
-                record::mixdown(&dir, &final_audio)?;
+                if live.continue_of.is_some() {
+                    record::mixdown_keeping_wav(&dir, &final_audio)?;
+                } else {
+                    record::mixdown(&dir, &final_audio)?;
+                }
+                if let Some(orig) = &live.continue_of {
+                    // 原来那场有转写时，先把这一段单独转写好再去接：原来那场的转写（改过的说话人名字）不用重来。
+                    // 原来那场没有转写（录音时 App 被关掉恢复出来的会议通常就是这样）时，合并后反正要整段重转，这里不白转一遍
+                    let orig_transcribed = st.folder(orig).is_ok_and(|d| d.join(TRANSCRIPT_JSON).is_file());
+                    let tr = if orig_transcribed { Some(st.run_transcribe(id, &final_audio, &dir)?) } else { None };
+                    return st.finish_continued(id, orig, &dir, tr.as_ref(), &live.hotwords);
+                }
                 st.run_process(id, &final_audio, &dir, &live.hotwords)
             }
         }
@@ -1873,8 +2284,17 @@ fn job_json(s: &AppState, job: &Job) -> Value {
             if live.silence_min > 0 {
                 data["auto_stop_s"] = (live.silence_min as u64 * 60).saturating_sub(silent).into();
             }
-            if let Some(err) = live.recorder.exited() {
+            let status = live.recorder.status();
+            if let Some(err) = status.error {
                 data["error"] = tr(&format!("录音中断：{err}"), &format!("Recording stopped: {err}")).into();
+            }
+            // 录音暂时停着（麦克风被占用、App 被挂起过）：界面要说清楚现在没在录
+            if let Some(pause) = status.pause {
+                data["paused_s"] = (pause.seconds.max(0.0) as u64).into();
+            }
+            // 之前暂停过、已经接上的时间：界面在它变多时提示有一段没录到
+            if status.lost_s >= 1.0 {
+                data["lost_s"] = (status.lost_s as u64).into();
             }
         }
     }
@@ -1911,10 +2331,17 @@ async fn list_asr_models(State(s): State<Shared>) -> Json<Value> {
     let language = s.config().asr_language;
     let english_meetings = language == "en";
     let bin = s.opt.recorder_bin.clone();
-    let apple = tokio::task::spawn_blocking(move || crate::apple_speech::status(&bin, &language)).await
-        .map_err(|e| e.to_string()).and_then(|r| r);
+    // Apple Speech 要靠桌面版的录音组件子进程，iOS 上不列出来
+    let ios = cfg!(target_os = "ios");
+    let apple = if ios {
+        Err(String::new())
+    } else {
+        tokio::task::spawn_blocking(move || crate::apple_speech::status(&bin, &language)).await
+            .map_err(|e| e.to_string()).and_then(|r| r)
+    };
     let list: Vec<Value> = models::catalog()
         .iter()
+        .filter(|m| !(ios && m.kind == AsrKind::AppleSpeech))
         .map(|m| {
             let mut v = json!({
                 "id": m.kind.id(),
@@ -1949,8 +2376,28 @@ fn paraformer_warning() -> &'static str {
 }
 
 /// 下载一个识别模型，下好了直接切过去
-async fn download_model(State(s): State<Shared>, UrlPath(id): UrlPath<String>) -> ApiResult<Json<Job>> {
+#[derive(Deserialize, Default)]
+struct DownloadReq {
+    /// cn（国内镜像）| github，界面里让用户选；不传按 cn
+    #[serde(default)]
+    source: String,
+}
+
+fn download_source(r: Option<Json<DownloadReq>>) -> ApiResult<models::Source> {
+    let id = r.map(|Json(r)| r.source).unwrap_or_default();
+    if id.is_empty() {
+        return Ok(models::Source::Cn);
+    }
+    models::Source::from_id(&id).ok_or_else(|| bad(tr(&format!("不认识的下载线路：{id}"), &format!("Unknown download source: {id}"))))
+}
+
+async fn download_model(
+    State(s): State<Shared>,
+    UrlPath(id): UrlPath<String>,
+    body: Option<Json<DownloadReq>>,
+) -> ApiResult<Json<Job>> {
     let kind = model_kind(&id)?;
+    let source = download_source(body)?;
     let paths = s.model_paths();
     if kind != AsrKind::AppleSpeech && paths.base_ready() && paths.asr_ready(kind) {
         return Err(bad(tr("这个模型已经下载好了", "This model is already downloaded")));
@@ -1963,7 +2410,7 @@ async fn download_model(State(s): State<Shared>, UrlPath(id): UrlPath<String>) -
             st.update(id, |j| j.stage = tr("正在检查／安装系统语音模型…", "Checking/installing system speech assets…").into());
             crate::apple_speech::run(&st.opt.recorder_bin, "speech-install", &st.config().asr_language, None)?;
         }
-        models::ensure_model(&paths, kind, |done, total| {
+        models::ensure_model(&paths, kind, source, |done, total| {
             st.update(id, |j| {
                 j.stage = format!("{:.0} / {:.0} MB", done as f64 / 1e6, total as f64 / 1e6)
             })
@@ -2009,14 +2456,15 @@ async fn delete_model(State(s): State<Shared>, UrlPath(id): UrlPath<String>) -> 
     Ok(Json(json!({"ok": true})))
 }
 
-async fn download_models(State(s): State<Shared>) -> ApiResult<Json<Job>> {
+async fn download_models(State(s): State<Shared>, body: Option<Json<DownloadReq>>) -> ApiResult<Json<Job>> {
+    let source = download_source(body)?;
     if s.model_paths().ready() {
         return Err(bad(tr("模型已经下载好了", "The models are already downloaded")));
     }
     let job = Job::new("models", "", "downloading");
     s.start_job(job.clone())?;
-    spawn_job(&s, &job.id, |st, id| {
-        models::ensure(&st.model_paths(), |done, total| {
+    spawn_job(&s, &job.id, move |st, id| {
+        models::ensure(&st.model_paths(), source, |done, total| {
             st.update(id, |j| {
                 j.stage = format!("{:.0} / {:.0} MB", done as f64 / 1e6, total as f64 / 1e6)
             })
@@ -2137,6 +2585,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/llm/models", post(llm_models))
         .route("/api/meetings", get(list_meetings))
         .route("/api/meetings/batch", post(post_batch))
+        .route("/api/meetings/merge", post(merge_meetings))
         .route("/api/meetings/{id}", get(get_meeting).delete(delete_meeting))
         .route("/api/meetings/{id}/audio", get(get_audio).delete(delete_audio))
         .route("/api/meetings/{id}/meta", put(put_meta))
@@ -2149,6 +2598,9 @@ pub fn router(state: Shared) -> Router {
         .route("/api/meetings/{id}/minutes", put(put_minutes))
         .route("/api/meetings/{id}/minutes/history", get(get_minutes_history))
         .route("/api/meetings/{id}/minutes/history/{version}", delete(delete_minutes_history))
+        // iOS 0.4.2 的旧路径
+        .route("/api/meetings/{id}/minutes/versions", get(get_minutes_history))
+        .route("/api/meetings/{id}/minutes/versions/{version}", delete(delete_minutes_history))
         .route("/api/meetings/{id}/summarize", post(post_summarize))
         .route("/api/meetings/{id}/process", post(post_process))
         .route("/api/meetings/{id}/push", post(post_push))
@@ -2198,9 +2650,28 @@ pub async fn serve_state(
     state: Arc<AppState>,
     port: u16,
 ) -> std::io::Result<(u16, impl std::future::Future<Output = ()>)> {
+    listen(router(state), port).await
+}
+
+/// 建好全部状态的服务（任务、录音、模型）；克隆后共用同一份状态。
+pub type App = Router;
+
+/// 原生端：录音完成只保存转写，纪要由显式的在线/离线操作生成。
+pub fn app_manual_minutes(opt: Options) -> App {
+    router(AppState::with_auto_minutes(opt, false))
+}
+
+/// 和 [`listen`] 分开，重新监听时保留录音和任务。
+pub fn app(opt: Options) -> App {
+    router(AppState::new(opt))
+}
+
+pub async fn listen(
+    app: App,
+    port: u16,
+) -> std::io::Result<(u16, impl std::future::Future<Output = ()>)> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
     let port = listener.local_addr()?.port();
-    let app = router(state);
     Ok((port, async move {
         let _ = axum::serve(listener, app).await;
     }))
@@ -2209,6 +2680,26 @@ pub async fn serve_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn draft_checkpoint_preserves_current_minutes() {
+        let dir = std::env::temp_dir().join(format!("tingo-draft-{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(MINUTES), "原纪要").unwrap();
+        write_minutes_draft(&dir, "收到第一段").unwrap();
+        write_minutes_draft(&dir, "收到第一段和第二段").unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join(MINUTES)).unwrap(), "原纪要");
+        assert_eq!(std::fs::read_to_string(dir.join("在线纪要草稿.md")).unwrap(), "收到第一段和第二段");
+        assert!(!dir.join("在线纪要草稿.tmp").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn native_processing_does_not_implicitly_generate_online_minutes() {
+        let opt = Options { root: PathBuf::new(), config_path: PathBuf::new(), models_dir: PathBuf::new(), recorder_bin: PathBuf::new(), version: "test".into(), sample_dir: PathBuf::new() };
+        let state = AppState::with_auto_minutes(opt, false);
+        assert!(state.run_auto_minutes("test", &Transcript::default(), Path::new("/nonexistent-native-test"), &[]).is_ok());
+    }
 
     use std::os::unix::fs::PermissionsExt;
 
@@ -2353,6 +2844,48 @@ mod tests {
         std::fs::remove_dir_all(root.parent().unwrap()).unwrap();
     }
 
+    #[test]
+    fn live_lines_are_grouped_by_speaker_for_the_model() {
+        use crate::chunked::LiveLine;
+        let l = |ms: u64, sp: Option<usize>, t: &str| LiveLine { start_ms: ms, speaker: sp, text: t.into() };
+        let lines = [l(1_000, Some(0), "下周三"), l(3_000, Some(0), "发报价。"), l(65_000, Some(1), "好的。"), l(70_000, None, " 还有一件事")];
+        assert_eq!(live_lines_text(&lines, Lang::Zh), "[00:01] 说话人1：下周三发报价。\n[01:05] 说话人2：好的。\n[01:10] 说话人：还有一件事");
+        let en = [l(0, Some(0), "Ship it"), l(900, Some(0), "on Friday.")];
+        assert_eq!(live_lines_text(&en, Lang::En), "[00:00] Speaker 1: Ship it on Friday.");
+    }
+
+    #[test]
+    fn live_notes_are_sent_only_when_the_page_has_an_older_version() {
+        let mut m = LiveMinutes { enabled: true, ..Default::default() };
+        assert!(live_notes_json(&m, None).get("markdown").is_none(), "还没整理出东西");
+        let reply = "## 一句话总结\n讨论报价。\n\n## 议题与讨论\n### 报价\n- 周三前发 [00:01]\n\n## 决议\n- 无\n\n## 待办\n| 事项 | 负责人 | 截止 |\n|---|---|---|\n\n## 待定问题与风险\n- 无";
+        m.notes = live_minutes::apply(&m.notes, reply).unwrap();
+        m.version = 1;
+        m.lang = Some(Lang::Zh);
+        let v = live_notes_json(&m, None);
+        assert!(v["markdown"].as_str().unwrap().starts_with("## 一句话总结\n讨论报价。"));
+        assert_eq!((v["v"].as_u64(), v["enabled"].as_bool()), (Some(1), Some(true)));
+        assert!(live_notes_json(&m, Some(1)).get("markdown").is_none());
+    }
+
+    #[tokio::test]
+    async fn config_think_defaults_off_and_is_kept_when_not_sent() {
+        let (s, root, _) = test_state("think");
+        assert_eq!(config_json(&s)["think"], false);
+        let put = |t: Option<bool>| {
+            let mut body = json!({"base_url": "https://api.minimaxi.com/v1", "model": "MiniMax-M3.1-Flash"});
+            if let Some(t) = t { body["think"] = t.into(); }
+            put_config(State(s.clone()), Json(serde_json::from_value(body).unwrap()))
+        };
+        assert!(put(Some(true)).await.is_ok());
+        assert!(s.config().llm.think);
+        assert!(put(None).await.is_ok());
+        assert_eq!(config_json(&s)["think"], true);
+        assert!(put(Some(false)).await.is_ok());
+        assert!(!s.config().llm.think);
+        std::fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    }
+
     #[tokio::test]
     async fn storage_failed_config_save_does_not_switch() {
         let (s, root, _) = test_state("directory-config-error");
@@ -2438,6 +2971,10 @@ mod tests {
         assert_eq!(status(s.update_meta("2026-10-01_0900_周会", &json!({"archived": 1}))), StatusCode::BAD_REQUEST);
         assert_eq!(status(s.update_meta("nope", &json!({}))), StatusCode::NOT_FOUND);
         assert_eq!(status(s.update_meta("../root", &json!({}))), StatusCode::NOT_FOUND);
+        // 正在处理：409，meta.json 不动
+        mark_busy(&s, "2026-10-01_0900_周会");
+        assert_eq!(status(s.update_meta("2026-10-01_0900_周会", &json!({"title": "y"}))), StatusCode::CONFLICT);
+        s.jobs.lock().unwrap().clear();
         // 详情也带 tags、archived、size_bytes
         let d = meeting_json(&a);
         assert_eq!((d["tags"].clone(), d["archived"].clone()), (json!(["项目A"]), json!(true)));

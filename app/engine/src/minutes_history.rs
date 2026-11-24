@@ -9,6 +9,8 @@ use std::{
 };
 static LOCK: Mutex<()> = Mutex::new(());
 const HISTORY: &str = "minutes-history";
+/// iOS 0.4.2 存历史版本用的隐藏目录，读到时并进 [`HISTORY`]
+const LEGACY_HISTORY: &str = ".minutes-history";
 #[derive(Serialize, Deserialize)]
 pub struct Version {
     pub id: String,
@@ -19,6 +21,20 @@ fn millis(time: SystemTime) -> u64 {
     time.duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+/// 把旧 iOS 版的历史版本搬进和 Mac 版共用的目录；搬不动的留在原处，不影响当前纪要
+fn migrate_legacy(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir.join(LEGACY_HISTORY)) else { return };
+    if fs::create_dir_all(dir.join(HISTORY)).is_err() {
+        return;
+    }
+    for entry in entries.flatten() {
+        let target = dir.join(HISTORY).join(entry.file_name());
+        if entry.path().extension().is_some_and(|e| e == "json") && !target.exists() {
+            let _ = fs::rename(entry.path(), target);
+        }
+    }
+    let _ = fs::remove_dir(dir.join(LEGACY_HISTORY));
 }
 fn version_path(dir: &Path, id: &str) -> io::Result<std::path::PathBuf> {
     if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit() || b == b'-') {
@@ -75,6 +91,7 @@ pub fn save(dir: &Path, text: &str) -> io::Result<()> {
 }
 pub fn list(dir: &Path) -> io::Result<Vec<Version>> {
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    migrate_legacy(dir);
     let entries = match fs::read_dir(dir.join(HISTORY)) {
         Ok(v) => v,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
@@ -123,6 +140,27 @@ mod tests {
         fs::write(dir.join(HISTORY), "blocked").unwrap();
         assert!(save(&dir, "third").is_err());
         assert_eq!(fs::read_to_string(dir.join(MINUTES)).unwrap(), "second");
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn legacy_ios_history_is_listed() {
+        let dir = std::env::temp_dir().join(format!(
+            "tingo-legacy-history-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(dir.join(LEGACY_HISTORY)).unwrap();
+        fs::write(
+            dir.join(LEGACY_HISTORY).join("17.json"),
+            r#"{"id":"17","saved_at":1793955484000,"text":"old"}"#,
+        )
+        .unwrap();
+        let versions = list(&dir).unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].text, "old");
+        assert!(!dir.join(LEGACY_HISTORY).exists());
         fs::remove_dir_all(dir).unwrap();
     }
 }

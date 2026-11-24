@@ -467,6 +467,13 @@ impl LiveTranscriber {
         (s.lines[from..].to_vec(), s.lines.len(), s.speaker_rev)
     }
 
+    /// 从第 `from` 句起新出的句子和总句数，不管说话人版本：实时纪要只要新说的话，
+    /// 前面的句子重新聚类改了说话人编号也不用重新整理
+    pub fn new_lines(&self, from: usize) -> (Vec<LiveLine>, usize) {
+        let s = self.inner.lock().unwrap();
+        (s.lines[from.min(s.lines.len())..].to_vec(), s.lines.len())
+    }
+
     /// 到目前为止识别出了多少句（有没有新出文字，自动结束录音时用来判断有没有人说话）。
     pub fn line_count(&self) -> usize {
         let s = self.inner.lock().unwrap();

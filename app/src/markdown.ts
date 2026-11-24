@@ -79,11 +79,13 @@ export function renderMarkdown(
           .split("|")
           .map((c) => c.trim());
       const [head, ...rest] = rows.filter((r, k) => !(k === 1 && /^[\s|:-]+$/.test(r)));
+      // 每格带上列名：手机上表格改成一行一张卡片时用
+      const labels = cells(head).map((c) => esc(c.replace(/[*_`]/g, "")));
       out.push(
         `<table><thead><tr>${cells(head)
           .map((c) => `<th>${inline(c)}</th>`)
           .join("")}</tr></thead><tbody>${rest
-          .map((r) => `<tr>${cells(r).map((c) => `<td>${inline(c)}</td>`).join("")}</tr>`)
+          .map((r) => `<tr>${cells(r).map((c, k) => `<td data-label="${labels[k] ?? ""}">${inline(c)}</td>`).join("")}</tr>`)
           .join("")}</tbody></table>`,
       );
       afterH1 = false;

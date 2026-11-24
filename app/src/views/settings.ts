@@ -1,11 +1,13 @@
+import { bindLocalMinutesSettings, usesLocalMinutes } from "../local-minutes";
 /* 设置：左边二级菜单，右边一次只显示一项——大模型（本机中转一键选择 + 远程服务 + 自定义）、识别模型（桌面版可下载切换）、
    热词、推送到群、Obsidian、运行环境。每一项单独保存。 */
 
-import { api, type Config, type Job, type LocalProvider } from "../api";
+import { api, type Config, isIOS, type Job, type LocalProvider } from "../api";
 import { $, $$, $maybe, errorMessage, esc, ICON, main, toast } from "../dom";
 import { refreshEnv } from "../sidebar";
 import { isBusy, S } from "../state";
 import { applyLang, type LangPref, renderShell, t } from "../i18n";
+import { bindSourcePicker, downloadInit, sourcePicker } from "../source";
 import { checkUpdate, showUpdate } from "../update";
 import { onboarded } from "./welcome";
 import { confirmBox, deleteAudio, fmtBytes } from "../manage";
@@ -162,7 +164,8 @@ async function drawAsr(): Promise<void> {
     return `<button class="btn" data-dl="${m.id}" ${dlId ? "disabled" : ""}>${ICON.download}${t("下载", "Download")} · ${m.size_mb} MB</button>`;
   };
   box.hidden = false;
-  $("#sAsrList", box).innerHTML = list
+  // 还有没下载的模型时才让选线路（SenseVoice、Fun-ASR-Nano 的模型包只在 GitHub 上，线路只影响共用的标点、声纹、VAD）
+  $("#sAsrList", box).innerHTML = (list.some((m) => !m.ready) && !dlId ? sourcePicker() : "") + list
     .map(
       (m) => `
       <div class="asr-row ${m.active ? "on" : ""}">
@@ -183,7 +186,8 @@ async function drawAsr(): Promise<void> {
     }
     drawAsr();
   };
-  $$<HTMLButtonElement>("[data-dl]", box).forEach((b) => (b.onclick = () => act(`/api/models/${b.dataset.dl}/download`, { method: "POST" })));
+  bindSourcePicker(box);
+  $$<HTMLButtonElement>("[data-dl]", box).forEach((b) => (b.onclick = () => act(`/api/models/${b.dataset.dl}/download`, downloadInit())));
   $$<HTMLButtonElement>("[data-use]", box).forEach(
     (b) => (b.onclick = () => act(`/api/models/${b.dataset.use}/use`, { method: "POST" }, t("已切换，下一次转写起生效", "Switched — takes effect from the next transcription"))),
   );
@@ -235,16 +239,16 @@ interface Ctx {
 let localProviders: Promise<LocalProvider[]> | undefined;
 
 const tabs = (): { id: Tab; name: string; icon: keyof typeof ICON }[] => [
-  { id: "llm", name: t("大模型", "LLM"), icon: "bot" },
+  { id: "llm", name: isIOS() ? t("纪要生成", "Meeting minutes") : t("大模型", "LLM"), icon: "bot" },
   { id: "asr", name: t("识别模型", "Speech model"), icon: "mic" },
   { id: "record", name: t("录音", "Recording"), icon: "mic" },
   { id: "lang", name: t("语言", "Language"), icon: "globe" },
   { id: "hotwords", name: t("热词", "Hotwords"), icon: "spark" },
   { id: "push", name: t("推送到群", "Share to chat"), icon: "send" },
   { id: "obsidian", name: "Obsidian", icon: "vault" },
-  { id: "storage", name: t("存储", "Storage"), icon: "folder" },
+  { id: "storage", name: isIOS() ? t("存储空间", "Storage space") : t("存储", "Storage"), icon: "folder" },
   { id: "about", name: t("运行环境", "About"), icon: "monitor" },
-];
+].filter((x) => !(isIOS() && x.id === "obsidian")) as { id: Tab; name: string; icon: keyof typeof ICON }[];
 
 const LANG_NAMES: Record<string, [string, string]> = {
   auto: ["跟随系统", "System"],
@@ -265,7 +269,7 @@ function subtitle(tab: Tab, x: Ctx): string {
   const c = x.c;
   switch (tab) {
     case "llm":
-      return c.model || t("未设置", "Not set");
+      return isIOS() && usesLocalMinutes() ? "手机离线 · MiniCPM" : c.model || t("未设置", "Not set");
     case "asr":
       return S.env?.asr_model ?? "Paraformer-large";
     case "hotwords":
@@ -335,6 +339,10 @@ async function save(x: Ctx, patch: Record<string, unknown>, tab: Tab): Promise<v
 
 const panelFoot = (extra = "") => `<div class="panel-foot">${extra}<span class="grow"></span><button class="btn primary" id="sSave">${t("保存", "Save")}</button></div>`;
 
+export function settingsPreview(): string {
+  return `<div class="page settings-page"><div class="page-head"><div><h1>${t("设置", "Settings")}</h1><div class="sub">${t("按你的习惯使用 Tingo", "Make Tingo work for you")}</div></div><nav class="settings-list">${tabs().map(tb => `<a><span class="set-ico">${ICON[tb.icon]}</span><span class="set-txt"><b>${tb.name}</b></span>${ICON.chevron}</a>`).join("")}</nav></div>`;
+}
+
 function settingsHeader(): string {
   return `<div><h1>${t("设置", "Settings")}</h1><div class="sub">${t("保存在本机配置文件里", "Stored in a local config file")}</div></div><span class="grow"></span>${
     onboarded() ? "" : `<a class="btn" href="#/welcome/llm">${t("回到新手引导", "Back to the tour")} ${ICON.chevron}</a>`
@@ -359,10 +367,14 @@ function revealTab(): void {
   nav.scrollTo({ left: on.offsetLeft - (nav.clientWidth - on.offsetWidth) / 2, behavior: "smooth" });
 }
 
-export async function renderSettings(tab: string = "llm", updated?: Config): Promise<void> {
+export async function renderSettings(tab: string = "", updated?: Config): Promise<void> {
   const list = tabs().filter((tb) => tb.id !== "asr" || S.env?.models_downloadable);
-  const cur = (list.find((tb) => tb.id === tab) ?? list[0]).id;
-  if (!$maybe("#sBody")) {
+  const selected = list.find((tb) => tb.id === tab);
+  if (isIOS() || matchMedia("(max-width: 820px)").matches) {
+    return renderMobileSettings(list, selected, updated);
+  }
+  const cur = (selected ?? list[0]).id;
+  if (!$maybe("#sBody.set-layout")) {
     localProviders = undefined;
     main().innerHTML = `<div class="page"><div class="page-head" id="sHead">${settingsHeader()}</div>
       <div class="set-layout" id="sBody"><nav class="set-nav">${list.map(
@@ -390,6 +402,37 @@ export async function renderSettings(tab: string = "llm", updated?: Config): Pro
     if (panel.isConnected) await PANELS[cur](x);
   } catch (e) {
     if (panel.isConnected) $("p", panel).textContent = errorMessage(e);
+  }
+}
+
+async function renderMobileSettings(
+  list: ReturnType<typeof tabs>,
+  selected: ReturnType<typeof tabs>[number] | undefined,
+  updated?: Config,
+): Promise<void> {
+  if (!$maybe(".settings-page")) localProviders = undefined;
+  main().innerHTML = `<div class="page settings-page ${selected ? "sub-page" : ""}">
+    ${selected ? `<a class="back" href="#/settings">${ICON.back}${t("设置", "Settings")}</a>` : ""}
+    <div class="page-head">${selected ? `<h1>${selected.name}</h1>` : settingsHeader()}</div>
+    <div id="sBody">${selected
+      ? `<section class="card s-card set-panel" id="sPanel"><p class="hint" role="status">${t("正在加载…", "Loading…")}</p></section>`
+      : `<nav class="settings-list" aria-label="${t("设置", "Settings")}">${list.map(({ id, icon, name }) =>
+          `<a href="#/settings/${id}" data-tab="${id}"><span class="set-ico">${ICON[icon]}</span><span class="set-txt"><b>${name}</b><small></small></span>${ICON.chevron}</a>`,
+        ).join("")}</nav>`}</div></div>`;
+  const body = $("#sBody");
+  try {
+    const c = updated ?? await api<Config>("/api/config");
+    if (!body.isConnected) return;
+    const x: Ctx = { c, vaults: [] };
+    if (selected?.id === "obsidian") x.vaults = await api<Ctx["vaults"]>("/api/obsidian/vaults").catch(() => []);
+    if (!body.isConnected) return;
+    if (selected) {
+      await PANELS[selected.id](x);
+    } else {
+      for (const link of $$("a[data-tab]", body)) $("small", link).textContent = subtitle(link.dataset.tab as Tab, x);
+    }
+  } catch (e) {
+    if (body.isConnected) toast(errorMessage(e), true);
   }
 }
 
@@ -475,11 +518,13 @@ async function panelStorage(): Promise<void> {
   const pct = (n: number) => (total ? Math.max(0.5, (n / total) * 100) : 0).toFixed(1);
   panel.innerHTML = `
     <h2>${t("存储", "Storage")}</h2>
-    <p class="hint">${t(`会议保存在 ${esc(st.root)}，磁盘还剩 ${fmtBytes(st.free_bytes)}。删除的东西都会进废纸篓，清空废纸篓后才真正腾出空间。`, `Meetings live in ${esc(st.root)}; ${fmtBytes(st.free_bytes)} free on this disk. Everything deleted goes to the Trash — empty it to actually free the space.`)}</p>
+    <p class="hint">${isIOS()
+      ? t(`会议保存在「文件」→ 我的 iPhone → Tingo，手机还剩 ${fmtBytes(st.free_bytes)}。删除的会议在「最近删除」里，永久删除后才腾出空间；单独删除的录音在 Tingo 文件夹的“已删除录音”，在「文件」App 里删掉才腾出空间。`, `Meetings live in Files → On My iPhone → Tingo; ${fmtBytes(st.free_bytes)} free. Deleted meetings stay in Recently deleted until you delete them permanently; deleted recordings go to “已删除录音” in the Tingo folder — remove them in the Files app to free the space.`)
+      : t(`会议保存在 ${esc(st.root)}，磁盘还剩 ${fmtBytes(st.free_bytes)}。删除的东西都会进废纸篓，清空废纸篓后才真正腾出空间。`, `Meetings live in ${esc(st.root)}; ${fmtBytes(st.free_bytes)} free on this disk. Everything deleted goes to the Trash — empty it to actually free the space.`)}</p>
     ${st.can_change_directory ? `<div class="storage-location">
       <label for="stPath">${t("会议存储目录", "Meeting folder")}</label>
       <div class="storage-location-picker"><input class="input" id="stPath" value="${esc(st.root)}" aria-label="${t("会议存储目录", "Meeting folder")}"><button class="btn" id="stChoose">${ICON.folder} ${t("选择文件夹", "Choose folder")}</button></div>
-      <label class="storage-copy"><input type="checkbox" id="stCopy" checked> ${t("将已有会议复制到新目录", "Copy existing meetings to the new folder")}</label>
+      <label class="storage-copy-option"><input type="checkbox" id="stCopy" checked> ${t("将已有会议复制到新目录", "Copy existing meetings to the new folder")}</label>
       <p class="hint">${t("录音、转写、纪要及历史版本一起保存。复制需选择空文件夹，原文件会保留。识别模型的位置不变。", "Recordings, transcripts, minutes and history stay together. Copying requires an empty folder; originals are kept. Speech models stay in their current location.")}</p>
       <div class="storage-location-actions"><button class="btn primary" id="stApply" disabled>${t("保存并切换", "Save and switch")}</button><span class="hint" id="stStatus" role="status" aria-live="polite"></span></div>
       <progress id="stProgress" hidden max="100"></progress>
@@ -595,7 +640,7 @@ async function panelStorage(): Promise<void> {
         toast(t("没有符合条件的会议，什么都没删", "Nothing matched — nothing was deleted"));
         return;
       }
-      toast(t(`已把 ${r.count} ${what}移到废纸篓，腾出 ${fmtBytes(r.freed_bytes)}`, `Moved ${r.count} to the Trash — freed ${fmtBytes(r.freed_bytes)}`));
+      toast(isIOS() ? t(`已把 ${r.count} ${what}移到“已删除录音”（${fmtBytes(r.freed_bytes)}）`, `Moved ${r.count} to deleted recordings (${fmtBytes(r.freed_bytes)})`) : t(`已把 ${r.count} ${what}移到废纸篓，腾出 ${fmtBytes(r.freed_bytes)}`, `Moved ${r.count} to the Trash — freed ${fmtBytes(r.freed_bytes)}`));
       await refreshMeetings();
       if (panel.isConnected) panelStorage();
     } catch (e) {
@@ -608,7 +653,7 @@ async function panelStorage(): Promise<void> {
     const archivedOnly = $("#stArch").classList.contains("on");
     const ok = await confirmBox(
       t(`删除 ${n} 天前${archivedOnly ? "已归档" : ""}会议的录音？`, `Delete recordings of ${archivedOnly ? "archived " : ""}meetings older than ${n} days?`),
-      t("录音会移到废纸篓，转写和纪要保留，以后就不能回听这些会议了。", "Recordings move to the Trash; transcripts and minutes stay, but you can't play those meetings back."),
+      isIOS() ? t("录音会移到 Tingo 文件夹的“已删除录音”，转写和纪要保留，以后就不能回听这些会议了。", "Recordings move to “已删除录音” in the Tingo folder; transcripts and minutes stay, but you can't play those meetings back.") : t("录音会移到废纸篓，转写和纪要保留，以后就不能回听这些会议了。", "Recordings move to the Trash; transcripts and minutes stay, but you can't play those meetings back."),
       t("删除录音", "Delete recordings"),
     );
     if (ok) run({ what: "audio", older_than_days: n, archived_only: archivedOnly }, t("场会议的录音", ""));
@@ -616,7 +661,7 @@ async function panelStorage(): Promise<void> {
   $$<HTMLButtonElement>("[data-audio]", panel).forEach(
     (b) =>
       (b.onclick = async () => {
-        if (!(await confirmBox(t("删除这场会议的录音？", "Delete this meeting's recording?"), t("录音会移到废纸篓，转写和纪要保留。", "The recording moves to the Trash; transcript and minutes stay."), t("删除录音", "Delete recording"))))
+        if (!(await confirmBox(t("删除这场会议的录音？", "Delete this meeting's recording?"), isIOS() ? t("录音会移到 Tingo 文件夹的“已删除录音”，转写和纪要保留。", "The recording moves to “已删除录音” in the Tingo folder; transcript and minutes stay.") : t("录音会移到废纸篓，转写和纪要保留。", "The recording moves to the Trash; transcript and minutes stay."), t("删除录音", "Delete recording"))))
           return;
         try {
           const r = await deleteAudio(b.dataset.audio ?? "");
@@ -649,13 +694,13 @@ function panelRecord(x: Ctx): void {
             ["30", "30 分钟", "30 min"],
           ],
         )}</div>
-      <div class="s-toggles">
+      <div class="s-toggles desk-only">
         <button class="toggle ${c.auto_stop_app_quit !== false ? "on" : ""}" id="sAppQuit">${ICON.monitor}${t(
           "会议软件退出时自动结束",
           "Stop when the meeting app quits",
         )}</button>
       </div>
-      <small class="hint">${t(
+      <small class="hint desk-only">${t(
         "会议软件包括腾讯会议、飞书、钉钉、Zoom、Teams、Webex、Slack：开始录音时开着的，全部退出后就结束。",
         "Meeting apps: Zoom, Teams, Webex, Slack, Tencent Meeting, Feishu, DingTalk — recording ends once all that were open at the start have quit.",
       )}</small>
@@ -738,6 +783,16 @@ function panelLlm(x: Ctx): void {
         <div class="field"><label>API Key</label><input class="input" id="sKey" type="password" autocomplete="off" placeholder="${keyHint}"></div>
         <div class="field"><label>${t("温度（可选）", "Temperature (optional)")}</label><input class="input" id="sTemp" inputmode="decimal" autocomplete="off" value="${c.temperature ?? ""}" placeholder="${t("留空用默认 0.2；Kimi 等只支持 1 的模型填 1", "Empty = 0.2; use 1 for models such as Kimi that only accept 1")}"></div>
       </div>
+      <div class="field"><button class="toggle ${c.live_minutes !== false ? "on" : ""}" id="sLive" type="button">${ICON.edit}${t("开会时实时整理纪要", "Live minutes while recording")}</button>
+        <div class="hint">${t(
+          "录音时每两分钟把新说的话交给大模型，在录音页的「实时纪要」里边开会边看。录完照样用整场转写写正式纪要。",
+          "While recording, what was said is sent to the model every two minutes and shown under Live minutes. Full minutes are still written from the whole transcript when you stop.",
+        )}</div></div>
+      <div class="field"><button class="toggle ${c.think ? "on" : ""}" id="sThink" type="button">${ICON.spark}${t("深度思考", "Deep thinking")}</button>
+        <div class="hint">${t(
+          "打开后模型先想清楚再写，负责人和截止日期更准，但长会议要多等两三分钟。关掉时纪要一般几十秒就好；有的模型关不掉思考（如 MiniMax），会请它少想。",
+          "The model thinks before writing: owners and due dates come out more accurate, but a long meeting takes two or three minutes longer. Off, minutes usually take under a minute; models that can't turn thinking off (such as MiniMax) are asked to think less.",
+        )}</div></div>
     </div>
     ${panelFoot(`<button class="btn" id="sTest">${t("测试连接", "Test connection")}</button><span class="test-msg" id="sTestMsg"></span>`)}`;
 
@@ -869,6 +924,7 @@ function panelLlm(x: Ctx): void {
       msg(errorMessage(e), "bad");
     }
   };
+  $$<HTMLButtonElement>("#sThink, #sLive").forEach((b) => (b.onclick = () => b.classList.toggle("on")));
   $("#sSave").onclick = () =>
     save(
       x,
@@ -878,9 +934,23 @@ function panelLlm(x: Ctx): void {
         api_key: key.value.trim() || null,
         api: getApi(),
         temperature: $<HTMLInputElement>("#sTemp").value.trim(), // 空 = 默认；不合法时后端会说
+        think: $("#sThink").classList.contains("on"),
+        live_minutes: $("#sLive").classList.contains("on"),
       },
       "llm",
     );
+  if (isIOS()) {
+    const panel = $("#sPanel");
+    const online = document.createElement("div");
+    online.id = "onlineMinutesConfig";
+    while (panel.firstChild) online.appendChild(panel.firstChild);
+    panel.appendChild(online);
+    online.querySelector("h2")!.textContent = t("在线服务", "Online service");
+    online.querySelector(".hint")!.textContent = t("使用你配置的服务整理转写，需要联网。", "Use your configured service to write minutes. Requires internet.");
+    const manager = document.createElement("div");
+    panel.prepend(manager);
+    void bindLocalMinutesSettings(manager, online);
+  }
 }
 
 function panelHotwords(x: Ctx): void {
@@ -958,8 +1028,8 @@ function panelObsidian(x: Ctx): void {
   $("#sPanel").innerHTML = `
     <h2>Obsidian</h2>
     <p class="hint">${t(
-      "把纪要存进 Obsidian 库：一场会一篇笔记，日期、时长、参会人写在属性里；鱼骨图存成 Excalidraw 画板嵌进笔记（装了 Excalidraw 插件就能直接改），每个分支下面列着引用的原话。",
-      "Save minutes to your Obsidian vault: one note per meeting with date, duration and participants as properties; fishbone diagrams are embedded as Excalidraw drawings (editable with the Excalidraw plugin), each branch listing its quotes.",
+      "把纪要存进 Obsidian 库：一场会一篇笔记，日期、时长、参会人写在属性里；鱼骨图存成 Excalidraw 画板嵌进笔记（装了 Excalidraw 插件就能直接改），导出仅保留分支与说明，引用原话在 App 内查看。",
+      "Save minutes to your Obsidian vault: one note per meeting with date, duration and participants as properties; fishbone diagrams are embedded as Excalidraw drawings (editable with the Excalidraw plugin), exports include branch titles and details; quotes remain available in the app.",
     )}</p>
     <div class="s-grid">
       ${vaults.length ? `<div class="field"><label>${t("本机 Obsidian 里的库", "Vaults on this Mac")}</label><div class="seg fit" id="sVaults">${vaults.map((v) => `<button data-path="${esc(v.path)}" title="${esc(v.path)}">${esc(v.name)}</button>`).join("")}</div></div>` : ""}
@@ -1023,13 +1093,13 @@ function panelAbout(x: Ctx): void {
   const env = S.env;
   const checks: [boolean, string, string][] = [
     ...(env?.models_downloadable ? [] : ([[!!env?.ffmpeg, "ffmpeg", env?.ffmpeg ? t("已安装", "Installed") : "brew install ffmpeg"]] as [boolean, string, string][])),
-    [
+    ...(isIOS() ? [] : ([[
       !!env?.system_audio,
       t("录系统声音", "System audio"),
       env?.system_audio
         ? t("可以录腾讯会议、飞书里对方的声音", "Can record the other side in Zoom, Teams, Tencent Meeting, Feishu…")
         : t("需要 macOS 15+ 和 Xcode 命令行工具；不影响导入录音", "Needs macOS 15+ and Xcode Command Line Tools; importing recordings still works"),
-    ],
+    ]] as [boolean, string, string][])),
     [
       !!env?.model_cached,
       t("识别模型", "Speech model"),
@@ -1045,7 +1115,7 @@ function panelAbout(x: Ctx): void {
       <div><span>${t("版本", "Version")}</span><code>${esc(env?.version ?? "")}</code></div>
     </div>
     <div class="about-actions">
-      <button class="btn" id="sUpd">${ICON.redo}${t("检查更新", "Check for updates")}</button><span class="test-msg" id="sUpdMsg"></span>
+      <button class="btn desk-only" id="sUpd">${ICON.redo}${t("检查更新", "Check for updates")}</button><span class="test-msg" id="sUpdMsg"></span>
       <span class="grow"></span>
       <a class="btn ghost" href="#/welcome">${t("重新打开新手引导", "Reopen the tour")}</a>
     </div>

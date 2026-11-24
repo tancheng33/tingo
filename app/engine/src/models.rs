@@ -18,7 +18,30 @@ use crate::i18n::tr;
 
 const MODELSCOPE: &str = "https://modelscope.cn/models/damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-onnx/resolve/master";
 const SHERPA: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download";
+/// 国内镜像：sherpa-onnx 作者在 ModelScope、HuggingFace 上传的同一批模型
+const MS_PUNCT: &str =
+    "https://modelscope.cn/models/csukuangfj/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12/resolve/master";
+const HF_MIRROR: &str = "https://hf-mirror.com/csukuangfj";
 const PUNCT_TAR: &str = "sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8";
+
+/// 模型从哪儿下：界面里让用户选。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Source {
+    /// 国内镜像：识别模型、标点走 ModelScope，声纹、VAD 走 hf-mirror。标点模型镜像上只有完整版，比量化版大 230 MB
+    Cn,
+    /// GitHub 官方发布：体积最小，国内经常很慢
+    Github,
+}
+
+impl Source {
+    pub fn from_id(id: &str) -> Option<Self> {
+        match id {
+            "cn" => Some(Self::Cn),
+            "github" => Some(Self::Github),
+            _ => None,
+        }
+    }
+}
 
 struct Download {
     url: String,
@@ -89,7 +112,19 @@ fn paraformer_downloads() -> Vec<Download> {
 }
 
 /// VAD、标点、声纹：所有识别模型共用
-fn base_downloads() -> Vec<Download> {
+fn base_downloads(source: Source) -> Vec<Download> {
+    if source == Source::Cn {
+        // 和 GitHub 上的结果实测一致：分段、说话人完全相同，只是标点偶尔差一个逗号（完整版 vs 量化版）
+        return vec![
+            Download { url: format!("{MS_PUNCT}/model.onnx"), to: "punct/model.onnx", size: 294_372_519 },
+            Download {
+                url: format!("{HF_MIRROR}/speaker-embedding-models/resolve/main/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"),
+                to: "campplus_zh.onnx",
+                size: 28_281_138,
+            },
+            Download { url: format!("{HF_MIRROR}/vad/resolve/main/silero_vad.onnx"), to: "silero_vad.onnx", size: 1_807_522 },
+        ];
+    }
     vec![
         Download { url: format!("{SHERPA}/punctuation-models/{PUNCT_TAR}.tar.bz2"), to: "download/punct.tar.bz2", size: 64_000_000 },
         Download {
@@ -101,30 +136,36 @@ fn base_downloads() -> Vec<Download> {
     ]
 }
 
-fn downloads() -> Vec<Download> {
+fn downloads(source: Source) -> Vec<Download> {
     let mut v = paraformer_downloads();
-    v.extend(base_downloads());
+    v.extend(base_downloads(source));
     v
 }
 
-pub fn total_size() -> u64 {
-    downloads().iter().map(|d| d.size).sum()
+pub fn total_size(source: Source) -> u64 {
+    downloads(source).iter().map(|d| d.size).sum()
 }
 
 /// 下载一个识别模型（连同还没下载的基础模型）。`progress(已下载字节, 总字节)`。
-pub fn ensure_model(paths: &ModelPaths, kind: AsrKind, mut progress: impl FnMut(u64, u64)) -> Result<(), String> {
+pub fn ensure_model(
+    paths: &ModelPaths,
+    kind: AsrKind,
+    source: Source,
+    mut progress: impl FnMut(u64, u64),
+) -> Result<(), String> {
     if kind == AsrKind::AppleSpeech {
-        let list = base_downloads();
+        let list = base_downloads(source);
         fetch_all(paths, &list, &mut progress)?;
         if !paths.punct().is_file() { extract_punct(&paths.dir.join("download/punct.tar.bz2"), paths.punct().parent().unwrap())?; }
         cleanup(paths, &list);
         return if paths.base_ready() { Ok(()) } else { Err("Shared speech models are incomplete".into()) };
     }
-    let Some(name) = archive(kind) else { return ensure(paths, progress) };
+    let Some(name) = archive(kind) else { return ensure(paths, source, progress) };
     if paths.base_ready() && paths.asr_ready(kind) {
         return Ok(());
     }
-    let mut list = if paths.base_ready() { Vec::new() } else { base_downloads() };
+    // SenseVoice、Fun-ASR-Nano 的模型包只在 GitHub 上有
+    let mut list = if paths.base_ready() { Vec::new() } else { base_downloads(source) };
     let size = catalog().iter().find(|m| m.kind == kind).map(|m| m.size).unwrap_or(0);
     let tar_to: &'static str = match kind {
         AsrKind::SenseVoice => "download/sensevoice.tar.bz2",
@@ -132,7 +173,7 @@ pub fn ensure_model(paths: &ModelPaths, kind: AsrKind, mut progress: impl FnMut(
     };
     list.push(Download { url: format!("{SHERPA}/asr-models/{name}.tar.bz2"), to: tar_to, size });
     fetch_all(paths, &list, &mut progress)?;
-    if !paths.base_ready() {
+    if !paths.punct().is_file() {
         extract_punct(&paths.dir.join("download/punct.tar.bz2"), paths.punct().parent().unwrap())?;
     }
     extract_dir(&paths.dir.join(tar_to), &paths.asr_dir(kind))?;
@@ -165,7 +206,9 @@ fn fetch_all(paths: &ModelPaths, list: &[Download], progress: &mut impl FnMut(u6
     let mut done_before = 0u64;
     let client = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(20))
-        .timeout(None)
+        // 阻塞客户端的超时按每次等待算（等响应头、每读一块），不是整个下载：
+        // 连着但不来数据（国内连 GitHub 常见）30 秒就断开，从断点重连
+        .timeout(Duration::from_secs(30))
         .user_agent("tingo")
         .build()
         .map_err(|e| e.to_string())?;
@@ -191,15 +234,18 @@ fn cleanup(paths: &ModelPaths, list: &[Download]) {
 }
 
 /// 下载并准备好全部模型。`progress(已下载字节, 总字节)`。可以重复调用：已完成的文件跳过，断点续传。
-pub fn ensure(paths: &ModelPaths, mut progress: impl FnMut(u64, u64)) -> Result<(), String> {
+pub fn ensure(paths: &ModelPaths, source: Source, mut progress: impl FnMut(u64, u64)) -> Result<(), String> {
     if paths.ready() {
         return Ok(());
     }
     let dir = &paths.dir;
-    let list = downloads();
+    let list = downloads(source);
     fetch_all(paths, &list, &mut progress)?;
     prepare_paraformer(&dir.join("download"), &dir.join("paraformer"))?;
-    extract_punct(&dir.join("download/punct.tar.bz2"), &dir.join("punct"))?;
+    // 国内镜像直接下的是 punct/model.onnx，没有压缩包
+    if !paths.punct().is_file() {
+        extract_punct(&dir.join("download/punct.tar.bz2"), &dir.join("punct"))?;
+    }
     cleanup(paths, &list);
     if paths.ready() {
         Ok(())
@@ -247,7 +293,11 @@ pub fn fetch(
         }
         let mut resp = match req.send() {
             Ok(r) if r.status().is_success() => r,
-            Ok(r) if r.status().as_u16() == 416 => break, // 已经下完
+            // 已经下完（上次写完了 .part 但没来得及改名）
+            Ok(r) if r.status().as_u16() == 416 && have > 0 => {
+                fs::rename(&part, dest).map_err(|e| e.to_string())?;
+                return Ok(());
+            }
             Ok(r) => {
                 last_err = format!("HTTP {}", r.status());
                 continue;
@@ -287,10 +337,7 @@ pub fn fetch(
             Err(e) => last_err = e,
         }
     }
-    if part.is_file() && !dest.is_file() {
-        fs::rename(&part, dest).map_err(|e| e.to_string())?;
-        return Ok(());
-    }
+    // 下了一半的 .part 留着，下次接着下
     Err(tr(
         &format!("下载失败（{url}）：{last_err}"),
         &format!("Download failed ({url}): {last_err}"),

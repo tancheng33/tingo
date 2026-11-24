@@ -2435,7 +2435,7 @@ checksum = "9e1c906769ad99c88eaa54e728060edef082f8e358ff32030cb7c7d315e81109"
 
 [[package]]
 name = "tingo-engine"
-version = "0.5.6"
+version = "0.6.0"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -2455,6 +2455,7 @@ dependencies = [
  "toml",
  "tower",
  "tower-http 0.7.1",
+ "uuid",
 ]
 
 [[package]]
@@ -2766,6 +2767,17 @@ name = "utf_types"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a3b425286980a367278453f3b6d28cdcb134b574e5a35824a6ff5eebad50bb6"
+
+[[package]]
+name = "uuid"
+version = "1.29.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c14b15dffa2f4bd712103e857140aa04a4f2ff6e955c77d7eb8e53ee02a3b64"
+dependencies = [
+ "getrandom 0.4.3",
+ "js-sys",
+ "wasm-bindgen",
+]
 
 [[package]]
 name = "valuable"

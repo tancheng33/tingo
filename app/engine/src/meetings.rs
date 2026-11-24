@@ -111,6 +111,15 @@ pub fn meeting_date(dir: &Path) -> NaiveDate {
         .unwrap_or_else(|| Local::now().date_naive())
 }
 
+/// 会议开始的时间：文件夹名里的日期和时分；不按约定起名的文件夹只知道日期，算当天零点。
+pub fn meeting_start(dir: &Path) -> NaiveDateTime {
+    let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    FOLDER
+        .captures(name)
+        .and_then(|c| NaiveDateTime::parse_from_str(&format!("{} {}:{}", &c[1], &c[2], &c[3]), "%Y-%m-%d %H:%M").ok())
+        .unwrap_or_else(|| meeting_date(dir).and_hms_opt(0, 0, 0).unwrap_or_default())
+}
+
 pub fn minutes_title(text: &str) -> Option<String> {
     text.lines()
         .find_map(|l| l.strip_prefix("# ").map(|t| t.trim().to_string()))
@@ -130,7 +139,7 @@ pub fn one_liner(text: &str) -> String {
     String::new()
 }
 
-/// 会议元数据 meta.json。写入时只写 title（为空时不写）、tags、archived 三个字段。
+/// 会议元数据 meta.json 里由用户编辑的三项：title（为空时不写）、tags、archived。其他字段写入时原样保留。
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct Meta {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -200,15 +209,38 @@ pub fn read_meta(dir: &Path) -> Meta {
     }
 }
 
-/// 写 meta.json：UTF-8、缩进 2、中文原样
+/// 写 meta.json：UTF-8、缩进 2、中文原样。只改 title、tags、archived 三项，
+/// 其他字段（Watch 录音的 source / watch_recording_id、中断恢复的 interrupted 等）原样保留；
+/// 现有文件读不出或不是 JSON 对象时不覆盖，返回错误。先写临时文件再改名，写一半不会留下坏文件。
 pub fn write_meta(dir: &Path, meta: &Meta) -> std::io::Result<()> {
+    #[derive(Serialize)]
+    struct Out<'a> {
+        #[serde(flatten)]
+        meta: &'a Meta,
+        #[serde(flatten)]
+        extra: serde_json::Map<String, Value>,
+    }
+    let path = dir.join(META);
+    let mut extra = match std::fs::read(&path) {
+        Ok(data) => match serde_json::from_slice::<Value>(&data) {
+            Ok(Value::Object(map)) => map,
+            _ => return Err(std::io::Error::other("meta.json 格式不对，没有覆盖")),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
+        Err(e) => return Err(e),
+    };
+    for k in ["title", "tags", "archived"] {
+        extra.remove(k);
+    }
     let meta = Meta {
         title: normalize_title(meta.title.as_deref()),
         tags: normalize_tags(&meta.tags),
         archived: meta.archived,
     };
-    let text = serde_json::to_string_pretty(&meta).map_err(std::io::Error::other)?;
-    std::fs::write(dir.join(META), text)
+    let text = serde_json::to_string_pretty(&Out { meta: &meta, extra }).map_err(std::io::Error::other)?;
+    let temp = dir.join(".meta.json.tmp");
+    std::fs::write(&temp, text)?;
+    std::fs::rename(temp, path)
 }
 
 /// 会议文件夹里的录音：录音.*（所有扩展名）、system.wav、mic.wav
@@ -293,6 +325,146 @@ pub struct Summary {
     pub size_bytes: u64,
     /// 有没有 录音.* 文件
     pub has_audio: bool,
+    /// 录音时 App 被系统关掉、下次启动恢复出来的会议。界面据此提示可以「接着录」
+    pub interrupted: bool,
+}
+
+/// meta.json 里的一个布尔记号（interrupted 之类），没有或读不出按 false
+fn meta_flag(dir: &Path, key: &str) -> bool {
+    let v: Option<serde_json::Value> = std::fs::read(dir.join(META)).ok().and_then(|d| serde_json::from_slice(&d).ok());
+    v.is_some_and(|m| m[key] == true)
+}
+
+/// 录音时 App 被系统关掉、恢复出来的会议做个记号（记在 meta.json 里，其余字段不动）。
+pub fn mark_interrupted(dir: &Path) -> std::io::Result<()> {
+    let path = dir.join("meta.json");
+    let mut meta = match std::fs::read(&path) {
+        Ok(data) => serde_json::from_slice(&data).map_err(std::io::Error::other)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(e) => return Err(e),
+    };
+    meta.as_object_mut()
+        .ok_or_else(|| std::io::Error::other("Invalid meeting metadata"))?
+        .insert("interrupted".into(), true.into());
+    let temp = dir.join(".meta.json.tmp");
+    std::fs::write(&temp, serde_json::to_vec_pretty(&meta).map_err(std::io::Error::other)?)?;
+    std::fs::rename(temp, path)
+}
+
+/// 与 Mac 版共用 meta.json 的 title 字段，保留其他字段。
+pub fn display_title(dir: &Path) -> Option<String> {
+    let meta: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("meta.json")).ok()?).ok()?;
+    meta.get("title")?.as_str().map(str::trim).filter(|s| !s.is_empty()).map(String::from)
+}
+
+pub fn set_title(dir: &Path, title: Option<&str>) -> std::io::Result<()> {
+    let path = dir.join("meta.json");
+    let mut meta: serde_json::Value = match std::fs::read(&path) {
+        Ok(data) => serde_json::from_slice(&data).map_err(std::io::Error::other)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(e) => return Err(e),
+    };
+    let object = meta.as_object_mut().ok_or_else(|| std::io::Error::other("Invalid meeting metadata"))?;
+    if let Some(title) = title.map(str::trim).filter(|t| !t.is_empty()) {
+        object.insert("title".into(), title.chars().take(80).collect::<String>().into());
+    } else { object.remove("title"); }
+    let temp = dir.join(".meta.json.tmp");
+    std::fs::write(&temp, serde_json::to_vec_pretty(&meta).map_err(std::io::Error::other)?)?;
+    std::fs::rename(temp, path)
+}
+
+/// iOS 没有系统废纸篓：整场会议移到文稿中的「已删除会议」（「最近删除」和 iCloud 同步都认这个目录），
+/// 每次删除放进带时间戳的新批次目录，绝不覆盖同名旧会议。
+pub fn move_to_deleted(root: &Path, dir: &Path) -> std::io::Result<()> {
+    let root = root.canonicalize()?;
+    if dir.canonicalize()?.parent() != Some(root.as_path()) {
+        return Err(std::io::Error::other("Invalid meeting path"));
+    }
+    move_into(&root, dir, DELETED_MEETINGS)
+}
+
+/// iOS 上「只删录音」：录音文件移到「已删除录音」，保留会议文件夹名，在「文件」App 里能找回。
+/// 不放进「已删除会议」，免得在「最近删除」里显示成一场只有录音的会议、被当成删除的会议同步。
+pub fn move_audio_to_deleted(root: &Path, file: &Path) -> std::io::Result<()> {
+    let root = root.canonicalize()?;
+    let meeting = file.canonicalize()?.parent().map(Path::to_path_buf);
+    if !file.is_file() || meeting.as_ref().and_then(|m| m.parent()) != Some(root.as_path()) {
+        return Err(std::io::Error::other("Invalid recording path"));
+    }
+    move_into(&root, file, DELETED_AUDIO)
+}
+
+pub const DELETED_MEETINGS: &str = "已删除会议";
+pub const DELETED_AUDIO: &str = "已删除录音";
+
+fn move_into(root: &Path, path: &Path, bin_name: &str) -> std::io::Result<()> {
+    let path = path.canonicalize()?;
+    let rel = path.strip_prefix(root).map_err(|_| std::io::Error::other("Invalid meeting path"))?.to_path_buf();
+    if rel.as_os_str().is_empty() || rel.starts_with(DELETED_MEETINGS) || rel.starts_with(DELETED_AUDIO) {
+        return Err(std::io::Error::other("Invalid meeting path"));
+    }
+    let bin = root.join(bin_name);
+    std::fs::create_dir_all(&bin)?;
+    if bin.canonicalize()? != bin { return Err(std::io::Error::other("Invalid deleted meetings path")); }
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let stamp = Local::now().format("%Y%m%d-%H%M%S-%f");
+    let batch = bin.join(format!("{}-{}", stamp, NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    let target = batch.join(&rel);
+    std::fs::create_dir_all(target.parent().unwrap_or(&batch))?;
+    std::fs::rename(&path, target)
+}
+
+#[derive(Serialize)]
+pub struct DeletedMeeting {
+    pub batch: String,
+    pub deleted_at: String,
+    #[serde(flatten)]
+    pub meeting: Summary,
+}
+
+pub fn deleted_folder(root: &Path, batch: &str, id: &str) -> std::io::Result<PathBuf> {
+    fn component(s: &str) -> bool {
+        !s.is_empty() && s != "." && s != ".." && !s.contains(['/', '\\'])
+    }
+    if !component(batch) || !component(id) { return Err(std::io::Error::other("Invalid deleted meeting")); }
+    let bin = root.canonicalize()?.join("已删除会议");
+    let path = bin.join(batch).join(id);
+    if path.canonicalize()? != path || !path.is_dir() {
+        return Err(std::io::Error::other("Invalid deleted meeting path"));
+    }
+    Ok(path)
+}
+
+pub fn deleted(root: &Path) -> Vec<DeletedMeeting> {
+    let mut items = Vec::new();
+    if let Ok(batches) = std::fs::read_dir(root.join("已删除会议")) {
+        for batch in batches.flatten() {
+            let b = batch.file_name().to_string_lossy().into_owned();
+            if let Ok(entries) = std::fs::read_dir(batch.path()) {
+                for entry in entries.flatten() {
+                    let id = entry.file_name().to_string_lossy().into_owned();
+                    if let Ok(dir) = deleted_folder(root, &b, &id) {
+                        let date = b.get(..15).and_then(|s| NaiveDateTime::parse_from_str(s, "%Y%m%d-%H%M%S").ok())
+                            .map(|d| d.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default();
+                        items.push(DeletedMeeting { batch: b.clone(), deleted_at: date, meeting: summary(&dir) });
+                    }
+                }
+            }
+        }
+    }
+    items.sort_by(|a, b| b.batch.cmp(&a.batch));
+    items
+}
+
+pub fn restore_deleted(root: &Path, batch: &str, id: &str) -> std::io::Result<PathBuf> {
+    let dir = deleted_folder(root, batch, id)?;
+    let mut dest = root.join(id);
+    let mut n = 2;
+    while dest.exists() { dest = root.join(format!("{id}_{n}")); n += 1; }
+    std::fs::rename(&dir, &dest)?;
+    // Only remove the empty batch, never another deleted meeting.
+    let _ = std::fs::remove_dir(dir.parent().unwrap());
+    Ok(dest)
 }
 
 pub fn summary(dir: &Path) -> Summary {
@@ -338,6 +510,7 @@ pub fn summary(dir: &Path) -> Summary {
         archived: meta.archived,
         size_bytes: size_of(dir),
         has_audio: has_recording(dir),
+        interrupted: meta_flag(dir, "interrupted"),
         id: name,
     }
 }
@@ -404,6 +577,99 @@ pub fn free_bytes(path: &Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trash_restore_preserves_collision_and_rejects_escape() {
+        let root = std::env::temp_dir().join(format!("tingo-trash-{}", uuid::Uuid::new_v4()));
+        let dir = root.join("2026-11-07_1200_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(AUDIO), b"old audio").unwrap();
+        std::fs::write(dir.join(MINUTES), "# Archived").unwrap();
+        move_to_deleted(&root, &dir).unwrap();
+        let items = deleted(&root); assert_eq!(items.len(), 1);
+        assert_eq!(items[0].meeting.title, "Archived");
+        assert!(deleted_folder(&root, "..", &items[0].meeting.id).is_err());
+        assert!(deleted_folder(&root, &items[0].batch, "../outside").is_err());
+        std::fs::create_dir_all(&dir).unwrap(); std::fs::write(dir.join(AUDIO), b"new audio").unwrap();
+        let restored = restore_deleted(&root, &items[0].batch, &items[0].meeting.id).unwrap();
+        assert_ne!(restored, dir);
+        assert_eq!(std::fs::read(restored.join(AUDIO)).unwrap(), b"old audio");
+        assert_eq!(std::fs::read(dir.join(AUDIO)).unwrap(), b"new audio");
+        assert!(deleted(&root).is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn meeting_start_comes_from_the_folder_name() {
+        let start = meeting_start(Path::new("/会议/2026-11-12_1452_周会"));
+        assert_eq!(start.format("%Y-%m-%d %H:%M").to_string(), "2026-11-12 14:52");
+        // 同一分钟开始的第二场，文件夹名后面多个 _2，时间照样认得出
+        assert_eq!(meeting_start(Path::new("/会议/2026-11-12_1452_周会_2")), start);
+    }
+
+    #[test]
+    fn interrupted_mark_keeps_the_rest_of_the_metadata() {
+        let dir = std::env::temp_dir().join(format!("tingo-interrupted-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!summary(&dir).interrupted);
+        set_title(&dir, Some("周会")).unwrap();
+        mark_interrupted(&dir).unwrap();
+        assert!(summary(&dir).interrupted);
+        assert_eq!(summary(&dir).title, "周会");
+        // 改标题也不会把记号冲掉
+        set_title(&dir, Some("周会（下半场）")).unwrap();
+        assert!(summary(&dir).interrupted);
+        // 改标签、归档也不会
+        write_meta(&dir, &Meta { title: Some("周会（下半场）".into()), tags: vec!["周会".into()], archived: true }).unwrap();
+        assert!(summary(&dir).interrupted);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn rename_preserves_metadata_and_delete_preserves_files() {
+        let root = std::env::temp_dir().join(format!("tingo-manage-{}", std::process::id()));
+        let dir = root.join("2026-11-06_1200_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("meta.json"), r#"{"tags":["work"],"archived":true}"#).unwrap();
+        std::fs::write(dir.join(MINUTES), "# Original").unwrap();
+        std::fs::write(dir.join("录音.m4a"), b"audio").unwrap();
+        set_title(&dir, Some("  New title  ")).unwrap();
+        assert_eq!(summary(&dir).title, "New title");
+        let meta: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("meta.json")).unwrap()).unwrap();
+        assert_eq!(meta["tags"][0], "work");
+        assert_eq!(meta["archived"], true);
+        set_title(&dir, None).unwrap();
+        assert_eq!(summary(&dir).title, "Original");
+        std::fs::write(dir.join("meta.json"), "broken").unwrap();
+        assert!(set_title(&dir, Some("do not overwrite")).is_err());
+        assert_eq!(std::fs::read_to_string(dir.join("meta.json")).unwrap(), "broken");
+        assert!(move_to_deleted(&root, &root).is_err());
+        for _ in 0..2 {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("录音.m4a"), b"audio").unwrap();
+            move_to_deleted(&root, &dir).unwrap();
+            assert!(!dir.exists());
+            assert!(list(&root).is_empty());
+        }
+        let batches: Vec<_> = std::fs::read_dir(root.join("已删除会议")).unwrap().flatten().collect();
+        assert_eq!(batches.len(), 2);
+        for batch in batches {
+            assert_eq!(std::fs::read(batch.path().join(dir.file_name().unwrap()).join("录音.m4a")).unwrap(), b"audio");
+        }
+        // 只删录音：录音进「已删除录音」，会议留在列表里，「最近删除」里不多出一场
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(TRANSCRIPT_JSON), "{}").unwrap();
+        std::fs::write(dir.join("录音.m4a"), b"audio").unwrap();
+        assert!(move_audio_to_deleted(&root, &dir).is_err());
+        move_audio_to_deleted(&root, &dir.join("录音.m4a")).unwrap();
+        assert!(!dir.join("录音.m4a").exists() && dir.join(TRANSCRIPT_JSON).exists());
+        assert_eq!(list(&root).len(), 1);
+        assert_eq!(deleted(&root).len(), 2);
+        let audio: Vec<_> = std::fs::read_dir(root.join(DELETED_AUDIO)).unwrap().flatten().collect();
+        assert_eq!(std::fs::read(audio[0].path().join(dir.file_name().unwrap()).join("录音.m4a")).unwrap(), b"audio");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn marks_roundtrip_sorted_and_tolerate_missing_or_broken_files() {
@@ -490,6 +756,15 @@ mod tests {
         assert_eq!(read_meta(&dir), Meta { title: None, tags: vec!["a".into()], archived: false });
         std::fs::write(dir.join(META), "not json").unwrap();
         assert_eq!(read_meta(&dir), Meta::default());
+        // 读不出的文件不覆盖
+        assert!(write_meta(&dir, &Meta::default()).is_err());
+        assert_eq!(std::fs::read_to_string(dir.join(META)).unwrap(), "not json");
+        // 其他字段原样保留，三项写在前面
+        std::fs::write(dir.join(META), r#"{"source":"apple_watch","watch_recording_id":"x","interrupted":true,"title":"旧"}"#).unwrap();
+        write_meta(&dir, &Meta { title: None, tags: vec!["周会".into()], archived: true }).unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(dir.join(META)).unwrap()).unwrap();
+        assert_eq!(v, serde_json::json!({"tags":["周会"],"archived":true,"interrupted":true,"source":"apple_watch","watch_recording_id":"x"}));
+        assert!(std::fs::read_to_string(dir.join(META)).unwrap().starts_with("{\n  \"tags\""));
         std::fs::remove_dir_all(dir).ok();
     }
 

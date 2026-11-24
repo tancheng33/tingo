@@ -114,13 +114,27 @@ def read_meta(folder: Path) -> dict:
 
 
 def write_meta(folder: Path, meta: dict) -> dict:
-    """写 meta.json（UTF-8、缩进 2、中文原样），只写 title（为空时不写）、tags、archived。返回规范化后的内容。"""
+    """写 meta.json（UTF-8、缩进 2、中文原样）。只改 title（为空时不写）、tags、archived，
+    其他字段（Watch 录音的 source / watch_recording_id、中断恢复的 interrupted 等）原样保留；
+    现有文件读不出或不是 JSON 对象时不覆盖，抛 OSError。返回规范化后的内容。"""
     title = meta.get("title")
     title = title.strip() if isinstance(title, str) else ""
     norm = {"title": title or None, "tags": normalize_tags(meta.get("tags")), "archived": meta.get("archived") is True}
+    path = folder / META
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        existing = {}
+    except (OSError, ValueError) as e:
+        raise OSError(f"meta.json 读不出，没有覆盖：{e}") from e
+    if not isinstance(existing, dict):
+        raise OSError("meta.json 格式不对，没有覆盖")
     data: dict = {"title": title} if title else {}
     data["tags"], data["archived"] = norm["tags"], norm["archived"]
-    (folder / META).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    data.update({k: v for k, v in existing.items() if k not in ("title", "tags", "archived")})
+    tmp = folder / ".meta.json.tmp"
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
     return norm
 
 

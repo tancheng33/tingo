@@ -1,3 +1,4 @@
+import { dismissLocalJob } from "./local-jobs";
 /* 任务列表：侧边栏"进行中"和首页玻璃面板下方都用它。录音之外的任务都在后台跑，这里看进度、点进去看过程。 */
 
 import { t } from "./i18n";
@@ -44,6 +45,7 @@ function item(j: Job, big: boolean): string {
 export async function dismissJob(id: string): Promise<void> {
   S.jobs = S.jobs.filter((j) => j.id !== id);
   renderTasks();
+  if (dismissLocalJob(id)) return;
   await api(`/api/jobs/${encodeURIComponent(id)}/dismiss`, { method: "POST" }).catch(() => {});
 }
 

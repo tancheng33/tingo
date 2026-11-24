@@ -92,6 +92,19 @@ def test_meta_write_format(tmp_path):
     assert (tmp_path / "meta.json").read_text(encoding="utf-8") == '{\n  "tags": [],\n  "archived": false\n}'
 
 
+def test_meta_write_keeps_other_fields(tmp_path):
+    (tmp_path / "meta.json").write_text(
+        '{"source": "apple_watch", "interrupted": true, "title": "旧"}', encoding="utf-8"
+    )
+    meetings.write_meta(tmp_path, {"title": None, "tags": ["周会"], "archived": True})
+    data = json.loads((tmp_path / "meta.json").read_text(encoding="utf-8"))
+    assert data == {"tags": ["周会"], "archived": True, "source": "apple_watch", "interrupted": True}
+    (tmp_path / "meta.json").write_text("not json", encoding="utf-8")
+    with pytest.raises(OSError):
+        meetings.write_meta(tmp_path, {"title": "x", "tags": [], "archived": False})
+    assert (tmp_path / "meta.json").read_text(encoding="utf-8") == "not json"
+
+
 def test_list_fields_and_title_precedence(client, root):
     weekly = item(client, WEEKLY)
     assert weekly["title"] == "周会"  # 纪要第一行

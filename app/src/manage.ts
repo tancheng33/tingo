@@ -1,9 +1,12 @@
 /* 会议管理：改名、标签、归档、删除（都移到废纸篓）、批量操作。会议列表和详情页共用。 */
 
-import { api, type MeetingSummary, meetingPath } from "./api";
+import { api, isIOS, type MeetingSummary, meetingPath } from "./api";
 import { $, $$, closeModal, esc, openModal } from "./dom";
 import { t } from "./i18n";
 import { S } from "./state";
+
+/** 整场删除的会议去哪：iOS 没有系统废纸篓，放进「最近删除」；Mac 上进系统废纸篓 */
+export const deletesToRecent = (): boolean => isIOS();
 
 export const fmtBytes = (n: number | null | undefined): string => {
   if (n == null) return "—";

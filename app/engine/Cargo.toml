@@ -1,6 +1,6 @@
 [package]
 name = "tingo-engine"
-version = "0.5.6"
+version = "0.6.0"
 description = "纪要的核心：识别、说话人区分、会议存储、纪要生成"
 authors = ["stardust <642720202@qq.com>"]
 license = "MIT"
@@ -26,3 +26,6 @@ tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "s
 toml = "1.1.8"
 tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.7.1", features = ["cors", "fs"] }
+
+[dev-dependencies]
+uuid = { version = "1", features = ["v4"] }
