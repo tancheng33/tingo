@@ -6,6 +6,13 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         build_recorder();
     }
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        // Windows N 版没有 Media Foundation：延迟加载，缺了也能启动，用到时引擎先检查再报错（engine/src/win.rs）
+        for dll in ["mfplat.dll", "mfreadwrite.dll"] {
+            println!("cargo:rustc-link-arg-bins=/DELAYLOAD:{dll}");
+        }
+        println!("cargo:rustc-link-arg-bins=delayimp.lib");
+    }
     tauri_build::build()
 }
 

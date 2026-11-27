@@ -20,6 +20,7 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
     COINIT_DISABLE_OLE1DDE, COINIT_MULTITHREADED,
 };
+use windows::Win32::System::LibraryLoader::LoadLibraryW;
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::Win32::UI::Shell::{
     FileOpenDialog, IFileOpenDialog, IShellItem, SHCreateItemFromParsingName, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST,
@@ -340,6 +341,17 @@ struct Mf;
 impl Mf {
     fn start() -> Result<Self, String> {
         com_mta();
+        // App 里这两个 DLL 是延迟加载的（src-tauri/build.rs）：先确认系统里有，没有时直接调用会让进程崩掉
+        let missing = ["mfplat.dll", "mfreadwrite.dll"]
+            .into_iter()
+            .any(|dll| unsafe { LoadLibraryW(&HSTRING::from(dll)) }.is_err());
+        if missing {
+            return Err(tr(
+                "系统缺少媒体组件（Windows N 版需要先在「设置 → 应用 → 可选功能」里装「媒体功能包」）",
+                "Windows Media Foundation is missing (on Windows N editions, install the Media Feature Pack under Settings → Apps → Optional features)",
+            )
+            .into());
+        }
         unsafe { MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET) }.map_err(|e| {
             tr(
                 &format!("系统的媒体组件用不了（Windows N 版需要先装「媒体功能包」）：{e}"),
