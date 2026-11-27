@@ -14,7 +14,6 @@ bzip2 = "0.6.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 faer = "0.22"
 hmac = "0.13.0"
-libc = "0.2.191"
 regex = "1.13.1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "stream", "json"] }
 serde = { version = "1.0.229", features = ["derive"] }
@@ -26,6 +25,25 @@ tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "s
 toml = "1.1.8"
 tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.7.1", features = ["cors", "fs"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.191"
+
+[target.'cfg(windows)'.dependencies]
+# 移到回收站。删除都在后台线程里做，用多线程套间初始化 COM
+trash = { version = "5.2.9", default-features = false, features = ["coinit_multithreaded"] }
+# 录音（WASAPI）、解码和压缩（Media Foundation）、选目录对话框
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Performance",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [dev-dependencies]
 uuid = { version = "1", features = ["v4"] }

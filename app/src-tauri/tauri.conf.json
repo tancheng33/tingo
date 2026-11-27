@@ -46,7 +46,6 @@
       "entitlements": "Entitlements.plist"
     },
     "resources": {
-      "bin/tingo-recorder": "tingo-recorder",
       "../../src/tingo/sample": "sample"
     }
   },

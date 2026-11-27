@@ -10,9 +10,10 @@ pub const VOICE_LEVEL: f32 = 0.4;
 /// 因为没人说话自动结束时，音轨保留到最后有声之后这么多秒
 pub const KEEP_AFTER_S: f64 = 30.0;
 
-/// 会议软件的进程名（比较时忽略大小写）
-pub const MEETING_APPS: [&str; 13] = [
+/// 会议软件的进程名（比较时忽略大小写；Windows 上不带 .exe）
+pub const MEETING_APPS: [&str; 17] = [
     "zoom.us",
+    "Zoom",
     "腾讯会议",
     "TencentMeeting",
     "WeMeetApp",
@@ -21,31 +22,31 @@ pub const MEETING_APPS: [&str; 13] = [
     "飞书",
     "Microsoft Teams",
     "MSTeams",
+    "ms-teams",
+    "Teams",
     "DingTalk",
     "钉钉",
     "Webex",
+    "CiscoCollabHost",
     "Slack",
 ];
 
-/// `ps -axo comm=` 的输出里出现的会议软件（小写的进程名）。每行取最后一段路径来比。
+/// 进程列表（`ps -axo comm=` 或整理过的 tasklist，一行一个）里出现的会议软件（小写的进程名）。
+/// 每行取最后一段路径来比，Windows 的 .exe 后缀去掉再比。
 pub fn meeting_apps_in(ps: &str) -> BTreeSet<String> {
     let wanted: Vec<String> = MEETING_APPS.iter().map(|a| a.to_lowercase()).collect();
     ps.lines()
         .filter_map(|l| {
-            let name = l.trim().rsplit('/').next()?.trim().to_lowercase();
+            let name = l.trim().rsplit(['/', '\\']).next()?.trim().to_lowercase();
+            let name = name.strip_suffix(".exe").map(str::to_string).unwrap_or(name);
             wanted.contains(&name).then_some(name)
         })
         .collect()
 }
 
-/// 本机正在运行的会议软件；ps 跑不起来时返回空
+/// 本机正在运行的会议软件；列不出进程时返回空
 pub fn running_meeting_apps() -> BTreeSet<String> {
-    std::process::Command::new("/bin/ps")
-        .args(["-axo", "comm="])
-        .output()
-        .ok()
-        .map(|o| meeting_apps_in(&String::from_utf8_lossy(&o.stdout)))
-        .unwrap_or_default()
+    meeting_apps_in(&crate::platform::process_names())
 }
 
 #[cfg(test)]
@@ -58,5 +59,12 @@ mod tests {
         let got: Vec<String> = meeting_apps_in(ps).into_iter().collect();
         assert_eq!(got, vec!["feishu", "msteams", "zoom.us", "腾讯会议"]);
         assert!(meeting_apps_in("").is_empty());
+    }
+
+    #[test]
+    fn finds_windows_meeting_apps_without_exe_suffix() {
+        let names = "System Idle Process\nexplorer.exe\nZoom.exe\nWeMeetApp.exe\nC:\\Program Files\\Feishu\\Feishu.exe\nms-teams.exe\nzoomit.exe";
+        let got: Vec<String> = meeting_apps_in(names).into_iter().collect();
+        assert_eq!(got, vec!["feishu", "ms-teams", "wemeetapp", "zoom"]);
     }
 }

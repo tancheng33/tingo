@@ -753,7 +753,14 @@ async fn env(State(s): State<Shared>) -> Json<Value> {
 }
 
 fn system_audio_supported(bin: &Path) -> bool {
-    if record::native().is_some() || !bin.is_file() {
+    if record::native().is_some() {
+        return false;
+    }
+    // Windows 用 WASAPI 回环录音，系统自带、不需要权限
+    if cfg!(windows) {
+        return true;
+    }
+    if !bin.is_file() {
         return false;
     }
     let out = std::process::Command::new("/usr/bin/sw_vers")
@@ -910,10 +917,9 @@ async fn put_config(State(s): State<Shared>, Json(r): Json<ConfigReq>) -> ApiRes
     }
     if let Some(o) = r.obsidian {
         c.obsidian = config::ObsidianConfig {
-            vault: match (o.vault.trim().strip_prefix("~/"), std::env::var("HOME")) {
-                (Some(rest), Ok(home)) => format!("{home}/{rest}"), // 设置页里可以填 ~/…
-                _ => o.vault.trim().into(),
-            },
+            // 设置页里可以填 ~/…
+            vault: crate::platform::expand_home(o.vault.trim())
+                .map_or_else(|| o.vault.trim().into(), |p| p.to_string_lossy().into_owned()),
             folder: o.folder.trim().trim_matches('/').into(),
             auto: o.auto,
             transcript: o.transcript,
@@ -1187,6 +1193,11 @@ struct StorageDirectoryReq {
 }
 
 async fn choose_storage(State(s): State<Shared>) -> ApiResult<Json<Value>> {
+    #[cfg(windows)]
+    let value = tokio::task::spawn_blocking(move || {
+        crate::win::choose_directory(&s.root()).map(|path| json!({ "path": path })).map_err(bad)
+    }).await.map_err(|e| server_error(e.to_string()))??;
+    #[cfg(not(windows))]
     let value = tokio::task::spawn_blocking(move || {
         let output = std::process::Command::new(&s.opt.recorder_bin)
             .arg("choose-directory").arg(s.root()).output().map_err(|e| bad(e.to_string()))?;
@@ -1469,7 +1480,7 @@ async fn post_obsidian(
         .map_err(bad)?;
     let uri = obsidian::uri(&out.note);
     if body.is_some_and(|b| b.open) {
-        let _ = std::process::Command::new("/usr/bin/open").arg(&uri).spawn();
+        crate::platform::open(&uri);
     }
     Ok(Json(json!({"ok": true, "path": out.note, "uri": uri, "drawings": out.drawings.len()})))
 }
@@ -1496,7 +1507,7 @@ async fn post_excalidraw(State(s): State<Shared>, UrlPath(id): UrlPath<String>) 
         std::fs::write(&p, text).map_err(|e| bad(e.to_string()))?;
         paths.push(p);
     }
-    let _ = std::process::Command::new("/usr/bin/open").arg("-R").arg(&paths[0]).spawn();
+    crate::platform::reveal(&paths[0]);
     Ok(Json(json!({"ok": true, "paths": paths})))
 }
 
@@ -1536,7 +1547,7 @@ async fn post_pdf(
         .await
         .map_err(|e| bad(e.to_string()))?
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let _ = std::process::Command::new("/usr/bin/open").arg("-R").arg(&out).spawn();
+    crate::platform::reveal(&out);
     Ok(Json(json!({"ok": true, "path": out})))
 }
 
@@ -1558,11 +1569,11 @@ async fn post_srt(State(s): State<Shared>, UrlPath(id): UrlPath<String>) -> ApiR
     let t = Transcript::load(&dir.join(TRANSCRIPT_JSON)).map_err(|_| bad(tr("还没有转写", "No transcript yet")))?;
     let out = dir.join(format!("{}.srt", export_stem(&dir, &id)));
     std::fs::write(&out, t.to_srt(i18n::ui())).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let _ = std::process::Command::new("/usr/bin/open").arg("-R").arg(&out).spawn();
+    crate::platform::reveal(&out);
     Ok(Json(json!({"ok": true, "path": out})))
 }
 
-/// 导出 Word：界面排好版的 HTML 交给 macOS 自带的 textutil 转成 .docx
+/// 导出 Word：界面排好版的 HTML 转成 .docx（macOS 用自带的 textutil，见 `record::html_to_docx`）
 async fn post_docx(
     State(s): State<Shared>,
     UrlPath(id): UrlPath<String>,
@@ -1580,7 +1591,7 @@ async fn post_docx(
         .await
         .map_err(|e| bad(e.to_string()))?
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let _ = std::process::Command::new("/usr/bin/open").arg("-R").arg(&out).spawn();
+    crate::platform::reveal(&out);
     Ok(Json(json!({"ok": true, "path": out})))
 }
 
@@ -1671,7 +1682,7 @@ async fn post_demo(State(s): State<Shared>) -> ApiResult<Json<Value>> {
 
 async fn reveal(State(s): State<Shared>, UrlPath(id): UrlPath<String>) -> ApiResult<Json<Value>> {
     let dir = s.folder(&id)?;
-    let _ = std::process::Command::new("/usr/bin/open").arg(dir).spawn();
+    crate::platform::open(dir);
     Ok(Json(json!({"ok": true})))
 }
 
@@ -2131,6 +2142,17 @@ fn record_test_run(bin: &Path, secs: u64) -> Value {
     let mut message = String::new();
     match record::probe(bin, system_ok, true, secs) {
         Ok(levels) => fill(levels, &mut status),
+        // Windows 录系统声音不要权限，权限问题只会出在麦克风上：单独再测一下系统声音
+        Err(e) if cfg!(windows) && system_ok && record::is_permission_error(&e) => {
+            status.insert("mic".into(), "denied");
+            match record::probe(bin, true, false, secs) {
+                Ok(levels) => fill(levels, &mut status),
+                Err(e2) => {
+                    status.insert("system".into(), failed(&e2));
+                }
+            }
+            message = e;
+        }
         // 没有录屏与系统录音权限：单独再测一下麦克风（只录麦克风不需要这个权限）
         Err(e) if system_ok && record::is_permission_error(&e) => {
             status.insert("system".into(), "denied");
@@ -2331,9 +2353,9 @@ async fn list_asr_models(State(s): State<Shared>) -> Json<Value> {
     let language = s.config().asr_language;
     let english_meetings = language == "en";
     let bin = s.opt.recorder_bin.clone();
-    // Apple Speech 要靠桌面版的录音组件子进程，iOS 上不列出来
-    let ios = cfg!(target_os = "ios");
-    let apple = if ios {
+    // Apple Speech 要靠 macOS 版的录音组件子进程，iOS、Windows 上不列出来
+    let no_apple = !cfg!(target_os = "macos");
+    let apple = if no_apple {
         Err(String::new())
     } else {
         tokio::task::spawn_blocking(move || crate::apple_speech::status(&bin, &language)).await
@@ -2341,7 +2363,7 @@ async fn list_asr_models(State(s): State<Shared>) -> Json<Value> {
     };
     let list: Vec<Value> = models::catalog()
         .iter()
-        .filter(|m| !(ios && m.kind == AsrKind::AppleSpeech))
+        .filter(|m| !(no_apple && m.kind == AsrKind::AppleSpeech))
         .map(|m| {
             let mut v = json!({
                 "id": m.kind.id(),
@@ -2528,7 +2550,7 @@ async fn download_update(State(s): State<Shared>) -> ApiResult<Json<Job>> {
     let job = Job::new("update", "", "downloading");
     s.start_job(job.clone())?;
     spawn_job(&s, &job.id, move |st, id| {
-        let home = std::env::var_os("HOME").map(PathBuf::from).ok_or("HOME")?;
+        let home = crate::platform::home_dir().ok_or("HOME")?;
         let dest = home.join("Downloads").join(&name);
         let _ = std::fs::remove_file(&dest);
         let _ = std::fs::remove_file(dest.with_extension("part"));
@@ -2547,7 +2569,7 @@ async fn download_update(State(s): State<Shared>) -> ApiResult<Json<Job>> {
                 .into());
             }
         }
-        let _ = std::process::Command::new("/usr/bin/open").arg(&dest).spawn();
+        crate::platform::open(&dest);
         st.update(id, |j| {
             j.notice = i18n::tr(
                 "新版已下载并校验，把 Tingo 拖进「应用程序」替换即可",
@@ -2701,9 +2723,7 @@ mod tests {
         assert!(state.run_auto_minutes("test", &Transcript::default(), Path::new("/nonexistent-native-test"), &[]).is_ok());
     }
 
-    use std::os::unix::fs::PermissionsExt;
-
-    /// 临时会议目录 + 假的录音组件：`trash <路径>` 把东西 mv 进 trash 目录并打印 OK；
+    /// 临时会议目录 + 假的录音组件（只在 Unix 上写，是个 sh 脚本）：`trash <路径>` 把东西 mv 进 trash 目录并打印 OK；
     /// 路径里带 FAIL 的打印 ERROR 失败
     fn test_state(name: &str) -> (Shared, PathBuf, PathBuf) {
         let base = std::env::temp_dir().join(format!("tingo-srv-{name}-{}", std::process::id()));
@@ -2714,17 +2734,21 @@ mod tests {
         }
         std::fs::write(models.join("model.onnx"), vec![0u8; 123]).unwrap();
         let bin = base.join("fake-recorder");
-        std::fs::write(
-            &bin,
-            format!(
-                "#!/bin/sh\n[ \"$1\" = trash ] || {{ echo 'ERROR: bad command'; exit 2; }}\n\
-                 case \"$2\" in *FAIL*) echo 'ERROR: 不让删'; exit 1;; esac\n\
-                 d=$(mktemp -d '{}/t.XXXXXX') && mv \"$2\" \"$d/\" && echo OK\n",
-                trash.display()
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(
+                &bin,
+                format!(
+                    "#!/bin/sh\n[ \"$1\" = trash ] || {{ echo 'ERROR: bad command'; exit 2; }}\n\
+                     case \"$2\" in *FAIL*) echo 'ERROR: 不让删'; exit 1;; esac\n\
+                     d=$(mktemp -d '{}/t.XXXXXX') && mv \"$2\" \"$d/\" && echo OK\n",
+                    trash.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         let state = AppState::new(Options {
             root: root.clone(),
             config_path: base.join("config.toml"),
@@ -2795,6 +2819,7 @@ mod tests {
         std::fs::remove_dir_all(root.parent().unwrap()).unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn storage_rejects_conflicts_nested_folders_and_links() {
         let (s, root, _) = test_state("directory-errors");
@@ -2897,6 +2922,7 @@ mod tests {
         std::fs::remove_dir_all(root.parent().unwrap()).unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn apple_model_status_switch_and_unavailable() {
         let (s, root, _) = test_state("apple-models");
@@ -2982,6 +3008,7 @@ mod tests {
         std::fs::remove_dir_all(root.parent().unwrap()).ok();
     }
 
+    #[cfg(unix)]
     #[test]
     fn delete_meeting_and_audio() {
         let (s, root, trash) = test_state("delete");
@@ -3015,6 +3042,7 @@ mod tests {
         std::fs::remove_dir_all(root.parent().unwrap()).ok();
     }
 
+    #[cfg(unix)]
     #[test]
     fn batch_actions() {
         let (s, root, _) = test_state("batch");
@@ -3077,6 +3105,7 @@ mod tests {
         std::fs::remove_dir_all(root.parent().unwrap()).ok();
     }
 
+    #[cfg(unix)]
     #[test]
     fn cleanup_leftovers_and_old_audio() {
         let (s, root, _) = test_state("cleanup");

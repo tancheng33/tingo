@@ -2,7 +2,15 @@ use std::path::Path;
 use std::process::Command;
 
 fn main() {
-    // 把 Swift 录音组件（录系统声音、麦克风，解码音视频）编译好，作为资源打进 App
+    // Windows 上录音、解码都在引擎进程里做（WASAPI、Media Foundation），没有 Swift 录音组件
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        build_recorder();
+    }
+    tauri_build::build()
+}
+
+fn build_recorder() {
+    // 把 Swift 录音组件（录系统声音、麦克风，解码音视频）编译好，作为资源打进 App（tauri.macos.conf.json）
     let src = Path::new("../../src/tingo/recorder.swift");
     let out = Path::new("bin/tingo-recorder");
     println!("cargo:rerun-if-changed={}", src.display());
@@ -33,5 +41,4 @@ fn main() {
             assert!(status.success(), "录音组件正式签名失败");
         }
     }
-    tauri_build::build()
 }

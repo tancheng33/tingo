@@ -12,8 +12,7 @@ use std::path::{Path, PathBuf};
 
 /// 本机 Obsidian 打开过的库（读 Obsidian 自己的配置），设置页里直接选。
 pub fn vaults() -> Vec<(String, String)> {
-    let Some(home) = std::env::var_os("HOME") else { return vec![] };
-    let p = PathBuf::from(home).join("Library/Application Support/obsidian/obsidian.json");
+    let Some(p) = obsidian_json() else { return vec![] };
     let Ok(v) = std::fs::read_to_string(p).map(|s| serde_json::from_str::<Value>(&s).unwrap_or_default()) else {
         return vec![];
     };
@@ -31,6 +30,18 @@ pub fn vaults() -> Vec<(String, String)> {
         .collect();
     out.sort_by_key(|b| std::cmp::Reverse(b.0)); // 最近打开的在前
     out.into_iter().map(|(_, n, p)| (n, p)).collect()
+}
+
+/// Obsidian 自己的配置文件（记着打开过哪些库）
+fn obsidian_json() -> Option<PathBuf> {
+    let dir = if cfg!(target_os = "macos") {
+        crate::platform::home_dir()?.join("Library/Application Support")
+    } else if cfg!(windows) {
+        PathBuf::from(std::env::var_os("APPDATA")?)
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| Some(crate::platform::home_dir()?.join(".config")))?
+    };
+    Some(dir.join("obsidian").join("obsidian.json"))
 }
 
 /// 文件名里不能出现的字符（Obsidian 链接也不认 # ^ [ ] |）

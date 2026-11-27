@@ -25,7 +25,7 @@
   --shadow-pop: 0 12px 40px -12px rgba(16, 24, 40, 0.18);
   --font: "PingFang SC", "PingFang TC", -apple-system, "system-ui", "Microsoft YaHei", sans-serif;
   --num: "SF Pro Display", -apple-system, "system-ui", "Helvetica Neue", sans-serif;
-  --mono: "SF Mono", ui-monospace, Menlo, monospace;
+  --mono: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
   --side-w: 248px;
   --rail-w: 56px;

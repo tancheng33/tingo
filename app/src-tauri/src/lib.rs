@@ -6,7 +6,8 @@
 //! - 会议：~/Documents/Tingo（和命令行 / Python 版共用；改名前的 ~/Documents/jiyao 存在时沿用）
 //! - 配置：~/.config/tingo/config.toml（共用；同上沿用 ~/.config/jiyao）
 //! - 识别模型：App 数据目录下的 models/，首次使用时在界面里下载；改名前下载的会搬过来
-//! - 录音组件：打包在 App 资源里的 tingo-recorder（Swift，ScreenCaptureKit + AVFoundation）
+//! - 录音组件：macOS 上是打包在 App 资源里的 tingo-recorder（Swift，ScreenCaptureKit + AVFoundation）；
+//!   Windows 上没有单独的组件，引擎直接用 WASAPI 和 Media Foundation
 //! - 示例会议：打包在 App 资源里的 sample/（新手引导里一键导入）
 
 mod updater;
@@ -57,7 +58,8 @@ fn migrate_models(data: &std::path::Path) {
 }
 
 fn start_backend(app: &tauri::App, state: Arc<Backend>) -> Result<(), String> {
-    let data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    // 识别模型几百 MB：Windows 上放 %LOCALAPPDATA%，不跟着漫游配置文件同步（macOS 上两个是同一个目录）
+    let data = app.path().app_local_data_dir().map_err(|e| e.to_string())?;
     migrate_models(&data);
     let resources = app.path().resource_dir().map_err(|e| e.to_string())?;
     let opt = server::Options {

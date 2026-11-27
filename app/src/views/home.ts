@@ -1,3 +1,4 @@
+import { thisMacEn, yourMacEn } from "../platform";
 import { usesLocalMinutes } from "../local-minutes";
 /* 首页：录音表单 → 录音中（计时、电平、实时文字）→ 结束后立刻回到录音表单，转写和生成纪要在后台进行，
    进度显示在玻璃面板下方和侧边栏。第一次使用时玻璃面板里下载识别模型。另含拖拽导入。 */
@@ -30,7 +31,7 @@ export function renderHome(): void {
   main().innerHTML = `
     <div class="page home-page">
       <div class="hero-head">
-        <span class="hero-tag"><b></b>${isIOS() ? t("本地转写 · 录音不出手机", "On-device transcription · audio never leaves your iPhone") : t("本地转写 · 录音不出本机", "On-device transcription · audio never leaves your Mac")}</span>
+        <span class="hero-tag"><b></b>${isIOS() ? t("本地转写 · 录音不出手机", "On-device transcription · audio never leaves your iPhone") : t(`本地转写 · 录音不出本机`, `On-device transcription · audio never leaves ${yourMacEn()}`)}</span>
         <h1>${t("开个会，纪要交给我", "Have the meeting. Tingo takes the notes.")}</h1>
         <p>${t("录下会议，自动转写、区分说话人，整理出议题、决议和待办", "Record, transcribe, tell speakers apart — and get topics, decisions and action items")}</p>
       </div>
@@ -84,7 +85,7 @@ function downloadPanel(): string {
   return `
     <div class="live-head" style="color:var(--blue)">${t("第一次使用", "First run")}</div>
     <div class="timer" style="font-size:22px;margin:12px 0 6px;font-family:var(--font)">${t(`先下载识别模型（约 <span id="dlSize">${mb}</span> MB）`, `Download the speech model first (~<span id="dlSize">${mb}</span> MB)`)}</div>
-    <div class="proc-note">${isIOS() ? t("只需下载一次，建议连着 Wi-Fi。识别、区分说话人都在这台手机上完成，录音不会上传。", "One-time download — Wi-Fi recommended. Recognition and speaker separation run on this iPhone — your audio is never uploaded.") : t("只需下载一次。识别、区分说话人都在这台电脑上完成，录音不会上传。", "One-time download. Recognition and speaker separation run on this Mac — your audio is never uploaded.")}</div>
+    <div class="proc-note">${isIOS() ? t("只需下载一次，建议连着 Wi-Fi。识别、区分说话人都在这台手机上完成，录音不会上传。", "One-time download — Wi-Fi recommended. Recognition and speaker separation run on this iPhone — your audio is never uploaded.") : t(`只需下载一次。识别、区分说话人都在这台电脑上完成，录音不会上传。`, `One-time download. Recognition and speaker separation run on ${thisMacEn()} — your audio is never uploaded.`)}</div>
     ${sourcePicker()}
     <div class="glass-foot">
       <span class="spacer"></span>

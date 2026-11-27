@@ -13,9 +13,7 @@ pub struct Progress {
 }
 
 pub fn destination(source: &Path, input: &str) -> Result<PathBuf, String> {
-    let path = if let Some(tail) = input.trim().strip_prefix("~/") {
-        PathBuf::from(std::env::var_os("HOME").ok_or("HOME unavailable")?).join(tail)
-    } else { PathBuf::from(input.trim()) };
+    let path = crate::platform::expand_home(input.trim()).ok_or("HOME unavailable")?;
     if !path.is_absolute() { return Err(tr("请选择绝对路径的文件夹", "Choose an absolute folder path").into()); }
     let path = path.canonicalize().map_err(|e| e.to_string())?;
     if !path.is_dir() { return Err(tr("请选择文件夹", "Choose a folder").into()); }

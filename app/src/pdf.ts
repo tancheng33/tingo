@@ -11,7 +11,7 @@ const CSS = `
 @page { size: A4; }
 * { box-sizing: border-box; }
 html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-body { margin: 0; font: 14px/1.8 -apple-system, "PingFang SC", "Helvetica Neue", sans-serif; color: #1d1d1f; }
+body { margin: 0; font: 14px/1.8 -apple-system, "PingFang SC", "Helvetica Neue", "Segoe UI", "Microsoft YaHei", sans-serif; color: #1d1d1f; }
 .head { display: flex; align-items: center; gap: 10px; padding-bottom: 14px; border-bottom: 1px solid #e9e9ed; margin-bottom: 22px; }
 .head svg { width: 22px; height: 22px; flex: none; }
 .head .brand { font-weight: 600; font-size: 13px; letter-spacing: .3px; }
@@ -28,12 +28,12 @@ h1.title { font-size: 25px; line-height: 1.35; margin: 0 0 10px; font-weight: 65
 .md ul, .md ol { margin: 5px 0; padding-left: 20px; }
 .md li { margin: 2px 0; }
 .md li::marker { color: #a3a7ad; }
-.md code { font: 12.5px ui-monospace, Menlo, monospace; background: #f2f2f5; padding: 1px 5px; border-radius: 5px; }
+.md code { font: 12.5px ui-monospace, Menlo, Consolas, monospace; background: #f2f2f5; padding: 1px 5px; border-radius: 5px; }
 .md table { width: calc(100% - 1px); border-collapse: collapse; margin: 10px 0; font-size: 13px; }
 .md th { text-align: left; font-weight: 500; color: #6b7076; background: #f6f7f9; font-size: 12px; }
 .md th, .md td { padding: 7px 10px; border: 1px solid #e9e9ed; vertical-align: top; }
 .md tr { break-inside: avoid; }
-.ts { display: inline; border: none; background: #eef2ff; color: #1f4bff; font: 500 11px ui-monospace, Menlo, monospace; padding: 0 5px; border-radius: 5px; margin: 0 2px; vertical-align: 1px; }
+.ts { display: inline; border: none; background: #eef2ff; color: #1f4bff; font: 500 11px ui-monospace, Menlo, Consolas, monospace; padding: 0 5px; border-radius: 5px; margin: 0 2px; vertical-align: 1px; }
 .fishbone { margin: 12px 0 4px; border: 1px solid #e9e9ed; border-radius: 12px; padding: 14px 16px; break-inside: avoid-page; }
 .fishbone.pending, .fb-draw { display: none; }
 .keep { break-inside: avoid-page; page-break-inside: avoid; }

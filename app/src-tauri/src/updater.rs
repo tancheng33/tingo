@@ -116,10 +116,13 @@ pub async fn native_update_install(app: AppHandle, state: State<'_, Arc<NativeUp
     let operation = state.operation.clone().try_lock_owned().map_err(|_| "更新操作正在进行 / Update already in progress")?;
     let engine = backend.engine.lock().unwrap().clone().ok_or("服务尚未就绪 / Engine not ready")?;
     let idle = engine.prepare_app_update()?;
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let bundle = exe.parent().and_then(|p| p.parent()).and_then(|p| p.parent());
-    if !bundle.is_some_and(|p| p.extension().is_some_and(|e| e == "app") && !p.starts_with("/Volumes")) {
-        return Err("请先将 Tingo 安装到应用程序后再更新 / Install Tingo in Applications before updating".into());
+    #[cfg(target_os = "macos")]
+    {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let bundle = exe.parent().and_then(|p| p.parent()).and_then(|p| p.parent());
+        if !bundle.is_some_and(|p| p.extension().is_some_and(|e| e == "app") && !p.starts_with("/Volumes")) {
+            return Err("请先将 Tingo 安装到应用程序后再更新 / Install Tingo in Applications before updating".into());
+        }
     }
     let (update, bytes) = {
         let mut inner = state.inner.lock().unwrap();

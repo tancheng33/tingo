@@ -197,10 +197,8 @@ pub fn default_path() -> PathBuf {
     if let Some(p) = env_var("CONFIG") {
         return PathBuf::from(p);
     }
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default();
-    with_legacy(home.join(".config/tingo/config.toml"), home.join(".config/jiyao/config.toml"))
+    let config = crate::platform::home_dir().unwrap_or_default().join(".config");
+    with_legacy(config.join("tingo").join("config.toml"), config.join("jiyao").join("config.toml"))
 }
 
 /// 读配置；环境变量优先（与 Python 版相同的几个）。文件不存在或格式不对时用默认值。

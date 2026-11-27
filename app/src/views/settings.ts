@@ -1,3 +1,4 @@
+import { thisMacEn, trashEn, trashZh } from "../platform";
 import { bindLocalMinutesSettings, usesLocalMinutes } from "../local-minutes";
 /* 设置：左边二级菜单，右边一次只显示一项——大模型（本机中转一键选择 + 远程服务 + 自定义）、识别模型（桌面版可下载切换）、
    热词、推送到群、Obsidian、运行环境。每一项单独保存。 */
@@ -278,7 +279,7 @@ function subtitle(tab: Tab, x: Ctx): string {
       return c.webhook ? platformOf(c.webhook) : t("未设置", "Not set");
     case "obsidian":
       return c.obsidian.vault
-        ? c.obsidian.vault.split("/").filter(Boolean).pop() + (c.obsidian.auto ? t(" · 自动存", " · auto") : "")
+        ? c.obsidian.vault.split(/[\\/]/).filter(Boolean).pop() + (c.obsidian.auto ? t(" · 自动存", " · auto") : "")
         : t("未设置", "Not set");
     case "storage":
       return S.meetings.length
@@ -469,7 +470,7 @@ function panelAsr(x: Ctx): void {
     <h2>${t("识别模型", "Speech model")}</h2>
     <p class="hint">${t(
       "把录音变成文字的模型，都在本机运行，录音不会上传。默认的 Paraformer 适合大多数中文会议；会上中英文混着说可以换 SenseVoice，要更准、想让热词在识别时就生效可以换 Fun-ASR-Nano。切换后从下一次转写起生效。",
-      "Turns audio into text, entirely on this Mac — audio is never uploaded. Paraformer (default) is best for Chinese; SenseVoice handles English and mixed-language meetings; Fun-ASR-Nano is the most accurate and applies your hotwords during recognition. Changes apply from the next transcription.",
+      "Turns audio into text, entirely on this computer — audio is never uploaded. Paraformer (default) is best for Chinese; SenseVoice handles English and mixed-language meetings; Fun-ASR-Nano is the most accurate and applies your hotwords during recognition. Changes apply from the next transcription.",
     )}</p>
     <div class="field" style="margin-bottom:14px"><label>${t("会议里说的语言", "Meeting language")}</label>
       ${segChoice("sAsrLang", x.c.asr_language ?? "zh", [
@@ -520,7 +521,7 @@ async function panelStorage(): Promise<void> {
     <h2>${t("存储", "Storage")}</h2>
     <p class="hint">${isIOS()
       ? t(`会议保存在「文件」→ 我的 iPhone → Tingo，手机还剩 ${fmtBytes(st.free_bytes)}。删除的会议在「最近删除」里，永久删除后才腾出空间；单独删除的录音在 Tingo 文件夹的“已删除录音”，在「文件」App 里删掉才腾出空间。`, `Meetings live in Files → On My iPhone → Tingo; ${fmtBytes(st.free_bytes)} free. Deleted meetings stay in Recently deleted until you delete them permanently; deleted recordings go to “已删除录音” in the Tingo folder — remove them in the Files app to free the space.`)
-      : t(`会议保存在 ${esc(st.root)}，磁盘还剩 ${fmtBytes(st.free_bytes)}。删除的东西都会进废纸篓，清空废纸篓后才真正腾出空间。`, `Meetings live in ${esc(st.root)}; ${fmtBytes(st.free_bytes)} free on this disk. Everything deleted goes to the Trash — empty it to actually free the space.`)}</p>
+      : t(`会议保存在 ${esc(st.root)}，磁盘还剩 ${fmtBytes(st.free_bytes)}。删除的东西都会进${trashZh()}，清空${trashZh()}后才真正腾出空间。`, `Meetings live in ${esc(st.root)}; ${fmtBytes(st.free_bytes)} free on this disk. Everything deleted goes to the ${trashEn()} — empty it to actually free the space.`)}</p>
     ${st.can_change_directory ? `<div class="storage-location">
       <label for="stPath">${t("会议存储目录", "Meeting folder")}</label>
       <div class="storage-location-picker"><input class="input" id="stPath" value="${esc(st.root)}" aria-label="${t("会议存储目录", "Meeting folder")}"><button class="btn" id="stChoose">${ICON.folder} ${t("选择文件夹", "Choose folder")}</button></div>
@@ -640,7 +641,7 @@ async function panelStorage(): Promise<void> {
         toast(t("没有符合条件的会议，什么都没删", "Nothing matched — nothing was deleted"));
         return;
       }
-      toast(isIOS() ? t(`已把 ${r.count} ${what}移到“已删除录音”（${fmtBytes(r.freed_bytes)}）`, `Moved ${r.count} to deleted recordings (${fmtBytes(r.freed_bytes)})`) : t(`已把 ${r.count} ${what}移到废纸篓，腾出 ${fmtBytes(r.freed_bytes)}`, `Moved ${r.count} to the Trash — freed ${fmtBytes(r.freed_bytes)}`));
+      toast(isIOS() ? t(`已把 ${r.count} ${what}移到“已删除录音”（${fmtBytes(r.freed_bytes)}）`, `Moved ${r.count} to deleted recordings (${fmtBytes(r.freed_bytes)})`) : t(`已把 ${r.count} ${what}移到${trashZh()}，腾出 ${fmtBytes(r.freed_bytes)}`, `Moved ${r.count} to the ${trashEn()} — freed ${fmtBytes(r.freed_bytes)}`));
       await refreshMeetings();
       if (panel.isConnected) panelStorage();
     } catch (e) {
@@ -653,7 +654,7 @@ async function panelStorage(): Promise<void> {
     const archivedOnly = $("#stArch").classList.contains("on");
     const ok = await confirmBox(
       t(`删除 ${n} 天前${archivedOnly ? "已归档" : ""}会议的录音？`, `Delete recordings of ${archivedOnly ? "archived " : ""}meetings older than ${n} days?`),
-      isIOS() ? t("录音会移到 Tingo 文件夹的“已删除录音”，转写和纪要保留，以后就不能回听这些会议了。", "Recordings move to “已删除录音” in the Tingo folder; transcripts and minutes stay, but you can't play those meetings back.") : t("录音会移到废纸篓，转写和纪要保留，以后就不能回听这些会议了。", "Recordings move to the Trash; transcripts and minutes stay, but you can't play those meetings back."),
+      isIOS() ? t("录音会移到 Tingo 文件夹的“已删除录音”，转写和纪要保留，以后就不能回听这些会议了。", "Recordings move to “已删除录音” in the Tingo folder; transcripts and minutes stay, but you can't play those meetings back.") : t(`录音会移到${trashZh()}，转写和纪要保留，以后就不能回听这些会议了。`, `Recordings move to the ${trashEn()}; transcripts and minutes stay, but you can't play those meetings back.`),
       t("删除录音", "Delete recordings"),
     );
     if (ok) run({ what: "audio", older_than_days: n, archived_only: archivedOnly }, t("场会议的录音", ""));
@@ -661,7 +662,7 @@ async function panelStorage(): Promise<void> {
   $$<HTMLButtonElement>("[data-audio]", panel).forEach(
     (b) =>
       (b.onclick = async () => {
-        if (!(await confirmBox(t("删除这场会议的录音？", "Delete this meeting's recording?"), isIOS() ? t("录音会移到 Tingo 文件夹的“已删除录音”，转写和纪要保留。", "The recording moves to “已删除录音” in the Tingo folder; transcript and minutes stay.") : t("录音会移到废纸篓，转写和纪要保留。", "The recording moves to the Trash; transcript and minutes stay."), t("删除录音", "Delete recording"))))
+        if (!(await confirmBox(t("删除这场会议的录音？", "Delete this meeting's recording?"), isIOS() ? t("录音会移到 Tingo 文件夹的“已删除录音”，转写和纪要保留。", "The recording moves to “已删除录音” in the Tingo folder; transcript and minutes stay.") : t(`录音会移到${trashZh()}，转写和纪要保留。`, `The recording moves to the ${trashEn()}; transcript and minutes stay.`), t("删除录音", "Delete recording"))))
           return;
         try {
           const r = await deleteAudio(b.dataset.audio ?? "");
@@ -764,7 +765,7 @@ function panelLlm(x: Ctx): void {
     <h2>${t("大模型", "LLM")}</h2>
     <p class="hint">${t(
       "用来把转写整理成纪要。支持 OpenAI 兼容接口和 Anthropic（Claude）接口。本机的 Magpie、CC Switch 中转打开后可以直接选；选本地 Ollama 则全程不出本机。",
-      "Turns the transcript into minutes. Works with OpenAI-compatible and Anthropic (Claude) APIs. Local relays (Magpie, CC Switch) are detected automatically; pick local Ollama to keep everything on this Mac.",
+      "Turns the transcript into minutes. Works with OpenAI-compatible and Anthropic (Claude) APIs. Local relays (Magpie, CC Switch) are detected automatically; pick local Ollama to keep everything on this computer.",
     )}</p>
     <div class="s-grid">
       <div class="prov-grid" id="sPreset"></div>
@@ -1032,7 +1033,7 @@ function panelObsidian(x: Ctx): void {
       "Save minutes to your Obsidian vault: one note per meeting with date, duration and participants as properties; fishbone diagrams are embedded as Excalidraw drawings (editable with the Excalidraw plugin), exports include branch titles and details; quotes remain available in the app.",
     )}</p>
     <div class="s-grid">
-      ${vaults.length ? `<div class="field"><label>${t("本机 Obsidian 里的库", "Vaults on this Mac")}</label><div class="seg fit" id="sVaults">${vaults.map((v) => `<button data-path="${esc(v.path)}" title="${esc(v.path)}">${esc(v.name)}</button>`).join("")}</div></div>` : ""}
+      ${vaults.length ? `<div class="field"><label>${t(`本机 Obsidian 里的库`, `Vaults on ${thisMacEn()}`)}</label><div class="seg fit" id="sVaults">${vaults.map((v) => `<button data-path="${esc(v.path)}" title="${esc(v.path)}">${esc(v.name)}</button>`).join("")}</div></div>` : ""}
       <div class="s-row2">
         <div class="field"><label>${t("库的位置", "Vault location")}</label><input class="input" id="sVault" value="${esc(c.obsidian.vault)}" placeholder="${vaults.length ? t("点上面选一个，或者填库的文件夹路径", "Pick one above or enter the vault folder") : t("Obsidian 库的文件夹路径，比如 ~/Documents/笔记", "Path to your vault folder, e.g. ~/Documents/Notes")}"></div>
         <div class="field"><label>${t("存到库里的哪个文件夹", "Folder inside the vault")}</label><input class="input" id="sObFolder" value="${esc(c.obsidian.folder)}" placeholder="${t("留空表示库的根目录", "Leave empty for the vault root")}"></div>

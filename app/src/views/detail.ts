@@ -1,5 +1,6 @@
 /* 会议详情：纪要 / 转写两个视图、回听播放器、说话人改名、编辑纪要、重新生成。 */
 
+import { baseName, finderEn, finderZh, trashEn, trashZh } from "../platform";
 import { api, isIOS, type Job, type MeetingDetail, meetingPath, share, url } from "../api";
 import { $, $$, $maybe, closeModal, color, errorMessage, esc, fmt, ICON, initial, main, openModal, openSheet, type SheetItem, toast, tsToMs } from "../dom";
 import { fishboneToText, turnResolver } from "../fishbone";
@@ -126,7 +127,7 @@ export async function renderDetail(id: string, keepTab = false, at?: number): Pr
               <button data-act="tags">${ICON.spark}<span><b>${t("编辑标签", "Edit tags")}</b><small>${t("按项目、类型给会议分类", "Group meetings by project or type")}</small></span></button>
               <button data-act="archive">${ICON.folder}<span><b>${d.archived ? t("取消归档", "Unarchive") : t("归档", "Archive")}</b><small>${d.archived ? t("放回会议列表", "Move back to the meeting list") : t("从会议列表收起，搜索时照样能找到", "Hide from the list; still searchable")}</small></span></button>
               ${d.audio ? `<button data-act="audio">${ICON.mic}<span><b>${t("只删录音", "Delete recording")}</b><small>${t("保留转写和纪要，腾出空间", "Keep transcript & minutes, free up space")}</small></span></button>` : ""}
-              <button data-act="delete" class="danger">${ICON.trash}<span><b>${t("删除会议", "Delete meeting")}</b><small>${deletesToRecent() ? t("移到「最近删除」，可以恢复", "Moves to Recently deleted; restorable") : t("移到废纸篓，可以恢复", "Moves to the Trash; restorable")}</small></span></button>
+              <button data-act="delete" class="danger">${ICON.trash}<span><b>${t("删除会议", "Delete meeting")}</b><small>${deletesToRecent() ? t("移到「最近删除」，可以恢复", "Moves to Recently deleted; restorable") : t(`移到${trashZh()}，可以恢复`, `Moves to the ${trashEn()}; restorable`)}</small></span></button>
             </div></div>
         </div>
       </div>
@@ -384,7 +385,7 @@ function drawGen(job: Job): void {
                 : t("大模型先通读整场转写，开始动笔后内容会一节一节出现在这里。", "The model reads the whole transcript first; sections will appear here as they're written.")
             : t(
                 "识别在这台电脑上进行，录音不会上传。转写完成后接着生成纪要，不用守着，可以去开下一场会。",
-                "Recognition runs on this Mac — audio is never uploaded. Minutes follow right after; no need to wait here, go ahead and start the next meeting.",
+                "Recognition runs on this computer — audio is never uploaded. Minutes follow right after; no need to wait here, go ahead and start the next meeting.",
               )
         }</p>`;
     const near = main().scrollHeight - main().scrollTop - main().clientHeight < 160;
@@ -470,7 +471,7 @@ async function showMinutesHistory(): Promise<void> {
           const result = await api<{ path?: string; message?: string }>(meetingPath(d.id, path), { method: "POST", json });
           if (result.path) {
             if (isIOS()) await share(result.path);
-            else toast(t(`已导出 ${result.path.split("/").pop()}`, `Exported ${result.path.split("/").pop()}`));
+            else toast(t(`已导出 ${baseName(result.path)}`, `Exported ${baseName(result.path)}`));
           }
           if (result.message) toast(result.message);
         }
@@ -655,17 +656,17 @@ async function moreAction(d: MeetingDetail, act: string): Promise<void> {
       await setMeta(d.id, { archived: !d.archived });
       toast(d.archived ? t("已放回会议列表", "Moved back to the list") : t("已归档", "Archived"));
     } else if (act === "audio") {
-      if (!(await confirmBox(t("删除这场会议的录音？", "Delete this meeting's recording?"), isIOS() ? t("录音会移到 Tingo 文件夹的“已删除录音”，转写和纪要保留，以后就不能回听了。", "The recording moves to “已删除录音” in the Tingo folder; the transcript and minutes stay, but you can't play it back.") : t("录音会移到废纸篓，转写和纪要保留，以后就不能回听了。", "The recording moves to the Trash; the transcript and minutes stay, but you can't play it back."), t("删除录音", "Delete recording"))))
+      if (!(await confirmBox(t("删除这场会议的录音？", "Delete this meeting's recording?"), isIOS() ? t("录音会移到 Tingo 文件夹的“已删除录音”，转写和纪要保留，以后就不能回听了。", "The recording moves to “已删除录音” in the Tingo folder; the transcript and minutes stay, but you can't play it back.") : t(`录音会移到${trashZh()}，转写和纪要保留，以后就不能回听了。`, `The recording moves to the ${trashEn()}; the transcript and minutes stay, but you can't play it back.`), t("删除录音", "Delete recording"))))
         return;
       stopAudio();
       const r = await deleteAudio(d.id);
       toast(t(`录音已删除，腾出 ${fmtBytes(r.freed_bytes)}`, `Recording deleted — freed ${fmtBytes(r.freed_bytes)}`));
     } else if (act === "delete") {
-      if (!(await confirmBox(t(`删除「${esc(d.title)}」？`, `Delete “${esc(d.title)}”?`), deletesToRecent() ? t("录音、转写和纪要会一起移到「最近删除」，可以随时恢复。", "The recording, transcript and minutes move to Recently deleted — you can restore them anytime.") : t("录音、转写和纪要会一起移到废纸篓，需要的话可以从废纸篓恢复。", "The recording, transcript and minutes move to the Trash — you can restore them from there."), deletesToRecent() ? t("删除会议", "Delete meeting") : t("移到废纸篓", "Move to Trash"))))
+      if (!(await confirmBox(t(`删除「${esc(d.title)}」？`, `Delete “${esc(d.title)}”?`), deletesToRecent() ? t("录音、转写和纪要会一起移到「最近删除」，可以随时恢复。", "The recording, transcript and minutes move to Recently deleted — you can restore them anytime.") : t(`录音、转写和纪要会一起移到${trashZh()}，需要的话可以从${trashZh()}恢复。`, `The recording, transcript and minutes move to the ${trashEn()} — you can restore them from there.`), deletesToRecent() ? t("删除会议", "Delete meeting") : t(`移到${trashZh()}`, `Move to ${trashEn()}`))))
         return;
       stopAudio();
       await deleteMeeting(d.id);
-      toast(deletesToRecent() ? t("已移到「最近删除」", "Moved to Recently deleted") : t("已移到废纸篓", "Moved to the Trash"));
+      toast(deletesToRecent() ? t("已移到「最近删除」", "Moved to Recently deleted") : t(`已移到${trashZh()}`, `Moved to the ${trashEn()}`));
       await refreshMeetings();
       location.hash = "#/meetings";
       return;
@@ -715,8 +716,8 @@ function bindExportMenu(d: MeetingDetail): void {
 
 /** 导出完：桌面上已经在访达里选中了；iOS 弹系统分享面板 */
 async function exported(path: string): Promise<void> {
-  const name = path.split("/").pop();
-  if (!isIOS()) return toast(t(`已导出 ${name}，已在访达中选中`, `Exported ${name} — shown in Finder`));
+  const name = baseName(path);
+  if (!isIOS()) return toast(t(`已导出 ${name}，已在${finderZh()}中选中`, `Exported ${name} — shown in ${finderEn()}`));
   try {
     await share(path);
   } catch (e) {
@@ -758,7 +759,7 @@ async function toExcalidraw(): Promise<void> {
   try {
     const r = await api<{ paths: string[] }>(meetingPath(S.detail.id, "/excalidraw"), { method: "POST" });
     if (isIOS() && r.paths?.[0]) return await share(r.paths[0]);
-    const name = r.paths?.[0]?.split("/").pop() ?? "";
+    const name = baseName(r.paths?.[0] ?? "");
     toast(t(`已导出${name}，拖进 excalidraw.com 即可编辑`, `Exported ${name} — drop it into excalidraw.com to edit`));
   } catch (e) {
     toast(errorMessage(e), true);

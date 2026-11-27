@@ -5132,6 +5132,7 @@ dependencies = [
  "toml 1.1.8+spec-1.1.0",
  "tower",
  "tower-http 0.7.1",
+ "trash",
 ]
 
 [[package]]
@@ -5414,6 +5415,22 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
+]
+
+[[package]]
+name = "trash"
+version = "5.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7363f9516b65bd2e855f4e6c3338b1a98efc2773c25349c958908897e1170ded"
+dependencies = [
+ "log",
+ "objc2",
+ "objc2-foundation",
+ "once_cell",
+ "percent-encoding",
+ "scopeguard",
+ "windows",
+ "windows-core",
 ]
 
 [[package]]

@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, windows]
   pull_request:
 
 jobs:
@@ -41,3 +41,31 @@ jobs:
         working-directory: app/src-tauri
       - run: cargo test --release --lib
         working-directory: app/engine
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: app/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: cargo clippy -- -D warnings
+        working-directory: app/src-tauri
+      # 包括 Windows 专属的：Media Foundation 压缩 / 解码来回、Edge 打印 PDF、有声卡时试录
+      - run: cargo test --release --lib
+        working-directory: app/engine
+      - run: pnpm tauri build --bundles nsis
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tingo-windows-installer
+          path: app/src-tauri/target/release/bundle/nsis/*.exe

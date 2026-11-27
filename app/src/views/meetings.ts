@@ -1,3 +1,4 @@
+import { trashEn, trashZh } from "../platform";
 import { api, isIOS, type Job, type MeetingSummary, meetingPath } from "../api";
 import { isEn, speakerName, t } from "../i18n";
 import { $, $$, $maybe, closeModal, color, errorMessage, esc, fmt, ICON, initial, main, openDialog, toast } from "../dom";
@@ -130,7 +131,7 @@ async function runBatch(kind: string): Promise<void> {
     tag = tags[0];
     for (const extra of tags.slice(1)) await batch(ids, "tag_add", extra).catch(() => {});
   }
-  if (kind === "delete" && !(await confirmBox(t(`删除 ${ids.length} 场会议？`, `Delete ${ids.length} meetings?`), trashNote(), deletesToRecent() ? t("删除会议", "Delete meetings") : t("移到废纸篓", "Move to Trash"))))
+  if (kind === "delete" && !(await confirmBox(t(`删除 ${ids.length} 场会议？`, `Delete ${ids.length} meetings?`), trashNote(), deletesToRecent() ? t("删除会议", "Delete meetings") : t(`移到${trashZh()}`, `Move to ${trashEn()}`))))
     return;
   if (
     kind === "delete_audio" &&
@@ -138,7 +139,7 @@ async function runBatch(kind: string): Promise<void> {
       t(`删除 ${ids.length} 场会议的录音？`, `Delete the recordings of ${ids.length} meetings?`),
       isIOS()
         ? t("只把录音移到 Tingo 文件夹的“已删除录音”，转写和纪要都保留，以后就不能回听了。", "Only the recordings move to “已删除录音” in the Tingo folder; transcripts and minutes stay, but you can't play them back.")
-        : t("只把录音移到废纸篓，转写和纪要都保留，以后就不能回听了。", "Only the recordings move to the Trash; transcripts and minutes stay, but you can't play them back."),
+        : t(`只把录音移到${trashZh()}，转写和纪要都保留，以后就不能回听了。`, `Only the recordings move to the ${trashEn()}; transcripts and minutes stay, but you can't play them back.`),
       t("删除录音", "Delete recordings"),
     ))
   )
@@ -161,7 +162,7 @@ async function runBatch(kind: string): Promise<void> {
 const trashNote = () =>
   deletesToRecent()
     ? t("录音、转写和纪要会移到「最近删除」，可以随时恢复。", "Recordings, transcripts and minutes move to Recently deleted — you can restore them anytime.")
-    : t("录音、转写和纪要都会移到废纸篓，需要的话可以从废纸篓恢复。", "Recordings, transcripts and minutes move to the Trash — you can restore them from there.");
+    : t(`录音、转写和纪要都会移到${trashZh()}，需要的话可以从${trashZh()}恢复。`, `Recordings, transcripts and minutes move to the ${trashEn()} — you can restore them from there.`);
 
 function drawMeetings(q: string): void {
   const box = $maybe("#mList");

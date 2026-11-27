@@ -1,0 +1,8 @@
+{
+  "bundle": {
+    "resources": {
+      "bin/tingo-recorder": "tingo-recorder",
+      "../../src/tingo/sample": "sample"
+    }
+  }
+}

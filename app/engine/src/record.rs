@@ -1,10 +1,15 @@
-//! 录音与音频文件：启停 Swift 录音组件、解码任意音视频、录完后混音并压成 m4a。
-//! 全部依赖 macOS 自带能力（ScreenCaptureKit、AVFoundation、afconvert），不需要 ffmpeg。
+//! 录音与音频文件：启停录音、解码任意音视频、录完后混音并压成 m4a。
+//! 全部依赖系统自带能力，不需要 ffmpeg：macOS 上是 Swift 录音组件（ScreenCaptureKit、AVFoundation）和 afconvert，
+//! Windows 上是 WASAPI 和 Media Foundation（见 `win` 模块，在进程里直接做）。
 //! iOS 上不能起子进程，这些能力由外壳通过 [`set_native`] 注入（Swift 插件）。
 
-use std::io::{BufRead, BufReader};
+#[cfg(not(windows))]
+use std::io::BufRead;
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdout, Command, Stdio};
+#[cfg(not(windows))]
+use std::process::Stdio;
+use std::process::{Child, ChildStdout, Command};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -82,6 +87,9 @@ pub struct Recorder {
     /// 子进程录音时有值；`Native` 录音时为空
     child: Option<Child>,
     stdout: Option<BufReader<ChildStdout>>,
+    /// Windows 上在进程里录音
+    #[cfg(windows)]
+    win: Option<crate::win::Capture>,
     pub dir: PathBuf,
     pub sources: Vec<String>,
     pub started: Instant,
@@ -106,58 +114,48 @@ impl Recorder {
             return Ok(Self {
                 child: None,
                 stdout: None,
+                #[cfg(windows)]
+                win: None,
                 dir: dir.to_path_buf(),
                 sources: vec!["mic".into()],
                 started: Instant::now(),
             });
         }
-        let mut cmd = Command::new(bin);
-        cmd.arg(dir);
-        if !mic {
-            cmd.arg("--no-mic");
-        }
-        if !system {
-            cmd.arg("--no-system");
-        }
-        let mut child = cmd
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| {
-                tr(&format!("启动录音组件失败：{e}"), &format!("Couldn't start the recorder: {e}")).to_string()
-            })?;
-        let mut stdout = BufReader::new(child.stdout.take().unwrap());
-        let mut line = String::new();
-        stdout.read_line(&mut line).map_err(|e| e.to_string())?;
-        let line = line.trim();
-        if line != "READY" {
-            let _ = child.wait();
-            return Err(line
-                .strip_prefix("ERROR: ")
-                .unwrap_or(tr("录音组件意外退出", "The recorder exited unexpectedly"))
-                .to_string());
-        }
-        let sources = [("system", system), ("mic", mic)]
+        let sources: Vec<String> = [("system", system), ("mic", mic)]
             .iter()
             .filter(|(_, on)| *on)
             .map(|(s, _)| s.to_string())
             .collect();
+        #[cfg(windows)]
+        let (child, stdout, win) = {
+            let _ = bin;
+            (None, None, Some(crate::win::Capture::start(dir, system, mic)?))
+        };
+        #[cfg(not(windows))]
+        let (child, stdout) = {
+            let (c, o) = spawn_helper(bin, dir, system, mic)?;
+            (Some(c), Some(o))
+        };
         Ok(Self {
-            child: Some(child),
-            stdout: Some(stdout),
+            child,
+            stdout,
+            #[cfg(windows)]
+            win,
             dir: dir.to_path_buf(),
             sources,
             started: Instant::now(),
         })
     }
-
     pub fn elapsed(&self) -> f64 {
         self.started.elapsed().as_secs_f64()
     }
 
     /// 录音组件是否中途退出了（比如权限被收回）；退出时返回它最后报的错。
     pub fn exited(&mut self) -> Option<String> {
+        #[cfg(windows)]
+        if let Some(c) = &self.win {
+            return c.error();
+        }
         let Some(child) = self.child.as_mut() else {
             return native().and_then(|n| n.mic_error());
         };
@@ -180,6 +178,10 @@ impl Recorder {
 
     /// 录音的状态：中途退出时的错误、是不是暂时停着（后者只有 App 自己录音时才有）。
     pub fn status(&mut self) -> MicStatus {
+        #[cfg(windows)]
+        if self.win.is_some() {
+            return MicStatus { error: self.exited(), ..Default::default() };
+        }
         if self.child.is_none() {
             return native().map(|n| n.mic_status()).unwrap_or_default();
         }
@@ -194,8 +196,13 @@ impl Recorder {
         native().and_then(|n| n.mic_status().pause)
     }
 
-    /// 停止录音：发 SIGINT 让它写完文件头，15 秒内没退出就强杀。原始音轨留着。
+    /// 停止录音：发 SIGINT 让录音组件写完文件头，15 秒内没退出就强杀。原始音轨留着。
     pub fn stop(&mut self) {
+        #[cfg(windows)]
+        if let Some(c) = self.win.as_mut() {
+            c.stop();
+            return;
+        }
         let Some(child) = self.child.as_mut() else {
             if let Some(n) = native() {
                 n.stop_mic();
@@ -205,9 +212,13 @@ impl Recorder {
         if child.try_wait().ok().flatten().is_some() {
             return;
         }
+        #[cfg(unix)]
         unsafe {
             libc::kill(child.id() as i32, libc::SIGINT);
         }
+        // Windows 没有能让子进程收尾的信号，只能直接结束
+        #[cfg(not(unix))]
+        let _ = child.kill();
         let deadline = Instant::now() + Duration::from_secs(15);
         while Instant::now() < deadline {
             if child.try_wait().ok().flatten().is_some() {
@@ -220,24 +231,68 @@ impl Recorder {
     }
 }
 
+/// 启动 Swift 录音组件，等它报告 READY（或出错）
+#[cfg(not(windows))]
+fn spawn_helper(bin: &Path, dir: &Path, system: bool, mic: bool) -> Result<(Child, BufReader<ChildStdout>), String> {
+    let mut cmd = Command::new(bin);
+    cmd.arg(dir);
+    if !mic {
+        cmd.arg("--no-mic");
+    }
+    if !system {
+        cmd.arg("--no-system");
+    }
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| {
+            tr(&format!("启动录音组件失败：{e}"), &format!("Couldn't start the recorder: {e}")).to_string()
+        })?;
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    stdout.read_line(&mut line).map_err(|e| e.to_string())?;
+    let line = line.trim();
+    if line != "READY" {
+        let _ = child.wait();
+        return Err(line
+            .strip_prefix("ERROR: ")
+            .unwrap_or(tr("录音组件意外退出", "The recorder exited unexpectedly"))
+            .to_string());
+    }
+    Ok((child, stdout))
+}
+
 impl Drop for Recorder {
     fn drop(&mut self) {
         self.stop();
     }
 }
 
-/// 任意音视频 → 16 kHz 单声道样本（经录音组件里的 AVFoundation 解码）。
-/// HTML → PDF：交给录音组件用系统 WebKit 排版（A4 分页）。
+/// HTML → PDF（A4 分页）：macOS 交给录音组件用系统 WebKit 排版，Windows 用无界面的 Edge 打印。
 pub fn html_to_pdf(bin: &Path, html: &str, out: &Path) -> Result<(), String> {
     let tmp = std::env::temp_dir().join(format!("tingo-pdf-{}-{}.html", std::process::id(), rand_suffix()));
     std::fs::write(&tmp, html).map_err(|e| e.to_string())?;
-    if let Some(n) = native() {
-        let res = n.html_to_pdf(&tmp, out);
-        let _ = std::fs::remove_file(&tmp);
-        return res;
-    }
-    let res = Command::new(bin).arg("pdf").arg(&tmp).arg(out).output();
+    let res = match native() {
+        Some(n) => n.html_to_pdf(&tmp, out),
+        None => render_pdf(bin, &tmp, out),
+    };
     let _ = std::fs::remove_file(&tmp);
+    res
+}
+
+#[cfg(windows)]
+fn render_pdf(_bin: &Path, html: &Path, out: &Path) -> Result<(), String> {
+    let browser = crate::browser_pdf::find_browser().ok_or_else(|| {
+        tr("导出 PDF 需要 Microsoft Edge，这台电脑上没找到", "PDF export needs Microsoft Edge, which wasn't found on this PC").to_string()
+    })?;
+    crate::browser_pdf::print(&browser, html, out)
+}
+
+#[cfg(not(windows))]
+fn render_pdf(bin: &Path, html: &Path, out: &Path) -> Result<(), String> {
+    let res = Command::new(bin).arg("pdf").arg(html).arg(out).output();
     let res = res.map_err(|e| {
         tr(&format!("启动排版失败：{e}"), &format!("Couldn't start the PDF renderer: {e}")).to_string()
     })?;
@@ -251,9 +306,15 @@ pub fn html_to_pdf(bin: &Path, html: &str, out: &Path) -> Result<(), String> {
         .unwrap_or(tr("导出 PDF 失败", "PDF export failed"))
         .to_string())
 }
+/// 移到回收站（不是彻底删除）。
+#[cfg(windows)]
+pub fn trash(_bin: &Path, path: &Path) -> Result<(), String> {
+    trash::delete(path).map_err(|e| tr(&format!("没能移到回收站：{e}"), &format!("Couldn't move to the Recycle Bin: {e}")).to_string())
+}
 
 /// 移到废纸篓（不是彻底删除）。macOS 上交给录音组件的 `trash <路径>`（FileManager.trashItem，
 /// 成功打印 OK，失败打印 ERROR: …）；其它系统有 gio 就用 `gio trash`，否则报不支持。
+#[cfg(not(windows))]
 pub fn trash(bin: &Path, path: &Path) -> Result<(), String> {
     let failed = |e: &str| tr(&format!("没能移到废纸篓：{e}"), &format!("Couldn't move to the Trash: {e}")).to_string();
     if cfg!(target_os = "macos") || bin.is_file() {
@@ -278,16 +339,17 @@ pub fn trash(bin: &Path, path: &Path) -> Result<(), String> {
     }
 }
 
+#[cfg(not(windows))]
 fn find_in_path(name: &str) -> Option<PathBuf> {
     std::env::split_paths(&std::env::var_os("PATH")?).map(|d| d.join(name)).find(|p| p.is_file())
 }
 
 pub const TEXTUTIL: &str = "/usr/bin/textutil";
 
-/// HTML → Word：macOS 自带的 textutil。没有 textutil（非 macOS）时报错。
+/// HTML → Word：macOS 用自带的 textutil，没有 textutil 的系统（Windows）用自己写的简单转换。
 pub fn html_to_docx(html: &str, out: &Path) -> Result<(), String> {
     if !Path::new(TEXTUTIL).is_file() {
-        return Err(tr("导出 Word 只支持 macOS", "Word export is only available on macOS").into());
+        return crate::docx::html_to_docx(html, out);
     }
     let tmp = std::env::temp_dir().join(format!("tingo-docx-{}-{}.html", std::process::id(), rand_suffix()));
     std::fs::write(&tmp, html).map_err(|e| e.to_string())?;
@@ -364,9 +426,20 @@ pub fn temp_wav(purpose: &str) -> PathBuf {
 
 /// 任意音视频 → 16 kHz 单声道 16 位的 wav 文件。声音不经过内存，长录音也不占地方。
 pub fn decode_to_wav(bin: &Path, input: &Path, out_wav: &Path) -> Result<(), String> {
-    if let Some(n) = native() {
-        return n.decode(input, out_wav);
+    match native() {
+        Some(n) => n.decode(input, out_wav),
+        None => decode_with_system(bin, input, out_wav),
     }
+}
+
+#[cfg(windows)]
+fn decode_with_system(_bin: &Path, input: &Path, out_wav: &Path) -> Result<(), String> {
+    crate::win::decode(input, out_wav)
+}
+
+/// 交给录音组件里的 AVFoundation 解码
+#[cfg(not(windows))]
+fn decode_with_system(bin: &Path, input: &Path, out_wav: &Path) -> Result<(), String> {
     let out = Command::new(bin)
         .arg("decode")
         .arg(input)
@@ -384,11 +457,21 @@ pub fn decode_to_wav(bin: &Path, input: &Path, out_wav: &Path) -> Result<(), Str
         .to_string())
 }
 
-/// wav → m4a（AAC 48 kbps）：iOS 上交给 App 自己，macOS 用自带的 afconvert。
+/// wav → m4a（AAC）：iOS 上交给 App 自己，macOS 用自带的 afconvert（48 kbps），Windows 用 Media Foundation（96 kbps）。
 pub fn compress(wav: &Path, dest: &Path) -> Result<(), String> {
-    if let Some(n) = native() {
-        return n.compress(wav, dest);
+    match native() {
+        Some(n) => n.compress(wav, dest),
+        None => compress_with_system(wav, dest),
     }
+}
+
+#[cfg(windows)]
+fn compress_with_system(wav: &Path, dest: &Path) -> Result<(), String> {
+    crate::win::compress(wav, dest)
+}
+
+#[cfg(not(windows))]
+fn compress_with_system(wav: &Path, dest: &Path) -> Result<(), String> {
     let out = Command::new("/usr/bin/afconvert")
         .args(["-f", "m4af", "-d", "aac", "-b", "48000"]) // 16 kHz 单声道 AAC 最高 48 kbps
         .arg(wav)
@@ -436,7 +519,7 @@ pub fn write_wav16(path: &Path, samples: &[f32]) -> std::io::Result<()> {
     std::fs::write(path, v)
 }
 
-/// 录完后：系统声音和麦克风按"让路"规则合成一条，压成 m4a（macOS 自带 afconvert，AAC 48 kbps），删掉原始轨道。
+/// 录完后：系统声音和麦克风按"让路"规则合成一条，压成 m4a（见 `compress`），删掉原始轨道。
 pub fn mixdown(dir: &Path, dest: &Path) -> Result<(), String> {
     mix(dir, dest, false)
 }

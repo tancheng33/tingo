@@ -35,10 +35,7 @@ pub fn default_root() -> PathBuf {
     if !cfg.storage_root.is_empty() {
         return PathBuf::from(cfg.storage_root);
     }
-    let docs = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default()
-        .join("Documents");
+    let docs = crate::platform::home_dir().unwrap_or_default().join("Documents");
     crate::config::with_legacy(docs.join("Tingo"), docs.join("jiyao"))
 }
 
@@ -46,10 +43,12 @@ pub fn default_root() -> PathBuf {
 pub fn folder_title(title: &str) -> String {
     static UNSAFE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"[\\/:*?"<>|\s]+"#).unwrap());
     let safe = UNSAFE.replace_all(title.trim(), "_");
+    // Windows 会悄悄去掉文件夹名末尾的点，建出来的文件夹就和记下的名字对不上了
+    let safe = safe.trim_end_matches('.');
     if safe.is_empty() {
         "会议".into()
     } else {
-        safe.into_owned()
+        safe.to_string()
     }
 }
 
@@ -561,18 +560,7 @@ pub fn storage(root: &Path, busy: impl Fn(&str) -> bool) -> Value {
     })
 }
 
-/// 路径所在磁盘的剩余空间（普通用户可用的）。路径还不存在时看最近一层存在的上级目录。
-pub fn free_bytes(path: &Path) -> Option<u64> {
-    use std::os::unix::ffi::OsStrExt;
-    let existing = path.ancestors().find(|p| p.exists())?;
-    let c = std::ffi::CString::new(existing.as_os_str().as_bytes()).ok()?;
-    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
-        return None;
-    }
-    #[allow(clippy::unnecessary_cast)] // 各平台字段类型不一样
-    Some(st.f_bavail as u64 * st.f_frsize as u64)
-}
+pub use crate::platform::free_bytes;
 
 #[cfg(test)]
 mod tests {
