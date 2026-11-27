@@ -1,10 +1,11 @@
 /* 检查更新（桌面版）：GitHub 上有新版本时侧栏版本号旁边亮起提示，点开看更新说明，
-   桌面版下载签名更新包，再由用户选择重启安装；浏览器入口保留 DMG 下载。 */
+   桌面版下载签名更新包，再由用户选择重启安装（Windows 上由安装程序替换后自动重开）；浏览器入口保留安装包下载。 */
 
 import { api, type Job } from "./api";
 import { closeModal, errorMessage, esc, openModal, toast } from "./dom";
 import { t } from "./i18n";
 import { renderMarkdown } from "./markdown";
+import { isWindows } from "./platform";
 import { S } from "./state";
 
 export interface UpdateInfo {
@@ -54,7 +55,10 @@ export function showUpdate(): void {
     <h3>${t(`Tingo ${u.latest} 可以更新了`, `Tingo ${u.latest} is available`)}</h3>
     <p class="hint">${t(`当前版本 ${u.current}`, `You have ${u.current}`)}${u.size_mb ? ` · ${u.size_mb} MB` : ""}</p>
     <div class="md update-notes">${renderMarkdown(u.notes ?? "")}</div>
-    <p class="hint">${t(
+    <p class="hint">${isWindows() ? t(
+      `会下载到「下载」文件夹${u.sha256 ? "，并核对 SHA-256" : ""}，然后打开安装程序，按提示完成更新。配置、会议和识别模型都会保留。`,
+      `It downloads to your Downloads folder${u.sha256 ? ", checks the SHA-256" : ""} and opens the installer — follow it to finish updating. Settings, meetings and models are kept.`,
+    ) : t(
       `会下载到「下载」文件夹${u.sha256 ? "，并核对 SHA-256" : ""}，然后打开安装包，把 Tingo 拖进「应用程序」替换旧版即可。配置、会议和识别模型都会保留。`,
       `It downloads to your Downloads folder${u.sha256 ? ", checks the SHA-256" : ""} and opens the installer — drag Tingo into Applications to replace the old version. Settings, meetings and models are kept.`,
     )}</p>

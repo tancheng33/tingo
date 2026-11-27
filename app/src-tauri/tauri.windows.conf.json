@@ -9,5 +9,10 @@
         "displayLanguageSelector": false
       }
     }
+  },
+  "plugins": {
+    "updater": {
+      "windows": { "installMode": "passive" }
+    }
   }
 }

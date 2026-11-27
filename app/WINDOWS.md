@@ -51,6 +51,20 @@ cd app/engine
 PATH="$(brew --prefix llvm)/bin:$(brew --prefix lld)/bin:$PATH" cargo xwin check --target x86_64-pc-windows-msvc --all-targets
 ```
 
+## 自动更新
+
+和 macOS 版走同一套：Tauri 更新插件读最新 Release 的 `latest.json`，按 `windows-x86_64` 找安装包，下载到内存后用 `tauri.conf.json` 里的公钥核对签名（签名绑定版本号）。用户点「重启并更新」时，确认没有录音和处理中的任务，再以「被动模式」运行 NSIS 安装程序：只显示进度条，不用点下一步，装完自动重新打开 Tingo。会议、配置、识别模型都不动。
+
+更新包就是安装包本身（`Tingo_<版本>_x64-setup.exe`），不需要另打 zip。安装程序由 App 自己下载、自己启动，不带「来自网络」的标记，所以更新时通常不会再弹 SmartScreen；装在当前用户目录，也不会弹管理员授权。
+
+发布时 Windows 安装包和 macOS 包一起签、写进同一份 `latest.json`（见 `scripts/README.md`）：
+
+```
+pnpm release:windows        # 或者从 CI 产物 tingo-windows-installer 下载
+python3 scripts/prepare-update.py --notes notes.md [--windows-installer 路径]
+```
+
+某个版本只发了 macOS 包时（`--skip-windows`），Windows 上检查更新显示为「已是最新」，不会报错。
 ## 实机测试清单
 
 CI 的 Windows 机器上已经跑过：Media Foundation 压缩再解码、Edge 打印 A4 PDF、生成 Word。CI 机器没有声卡，录音只能在真机上测。
@@ -70,11 +84,11 @@ CI 的 Windows 机器上已经跑过：Media Foundation 压缩再解码、Edge �
 10. 删除会议、删除录音：进回收站，能从回收站还原。
 11. 自动停止：开着会议软件录音，退出会议软件后能自动结束录音（如果开了这个选项）。
 12. 「在资源管理器中显示」、打开 Obsidian（装了的话）。
+13. 自动更新（要等发布一个比已装版本新、带 Windows 包的 Release）：设置 →「检查更新」看到新版，下载后显示签名校验通过；点「重启并更新」，出现只有进度条的安装窗口，装完 Tingo 自动重新打开，版本号变成新版，会议和模型都在。录音中点「重启并更新」应被拦下。
 
 有问题时把界面提示、以及 `%USERPROFILE%\Documents\Tingo` 里那场会议的文件列表发回来。
 
 ## 还没做的
 
 - 代码签名（SmartScreen 提示）
-- 自动更新：要在发布时给 Windows 安装包签更新签名（`createUpdaterArtifacts`），并把 `windows-x86_64` 写进 `latest.json`
 - ARM64 版

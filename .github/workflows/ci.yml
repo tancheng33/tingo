@@ -61,6 +61,9 @@ jobs:
       - run: pnpm build
       - run: cargo clippy -- -D warnings
         working-directory: app/src-tauri
+      # 更新器：清单里没有本平台的包时按「没有更新」处理
+      - run: cargo test --lib
+        working-directory: app/src-tauri
       # 包括 Windows 专属的：Media Foundation 压缩 / 解码来回、Edge 打印 PDF、有声卡时试录
       - run: cargo test --release --lib
         working-directory: app/engine

@@ -49,6 +49,12 @@ impl NativeUpdater {
     }
 }
 
+/// A release published without a package for this platform (e.g. macOS first, Windows later)
+/// is not an update for this machine rather than an error.
+fn missing_platform(error: &tauri_plugin_updater::Error) -> bool {
+    matches!(error, tauri_plugin_updater::Error::TargetNotFound(_) | tauri_plugin_updater::Error::TargetsNotFound(_))
+}
+
 #[tauri::command]
 pub fn native_update_status(app: AppHandle, state: State<'_, Arc<NativeUpdater>>) -> Status {
     state.status(&app)
@@ -62,6 +68,10 @@ pub async fn native_update_check(app: AppHandle, state: State<'_, Arc<NativeUpda
     let result = app.updater_builder().timeout(Duration::from_secs(20))
         .header("Cache-Control", "no-cache").map_err(|e| e.to_string())?
         .build().map_err(|e| e.to_string())?.check().await;
+    let result = match result {
+        Err(error) if missing_platform(&error) => Ok(None),
+        result => result,
+    };
     match result {
         Ok(update) => {
             let mut inner = state.inner.lock().unwrap();
@@ -135,6 +145,8 @@ pub async fn native_update_install(app: AppHandle, state: State<'_, Arc<NativeUp
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         // Hold both guards until restart, even if the webview closes or cancels its request.
+        // On Windows a successful install never returns: the plugin starts the NSIS installer
+        // (passive, relaunches Tingo afterwards) and exits this process.
         let (_operation, _idle) = (operation, idle);
         match update.install(&bytes) {
             Ok(()) => app.restart(),
@@ -150,6 +162,58 @@ pub async fn native_update_install(app: AppHandle, state: State<'_, Arc<NativeUp
 mod tests {
     use super::*;
 
+    fn mock_app() -> (tauri::App<tauri::test::MockRuntime>, serde_json::Value) {
+        let config: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+        context.config_mut().plugins.0.insert("updater".into(), config["plugins"]["updater"].clone());
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_updater::Builder::new().build())
+            .build(context).unwrap();
+        (app, config)
+    }
+
+    #[test]
+    fn release_without_this_platform_is_not_an_error() {
+        let (app, _) = mock_app();
+        let platform = |name: &str| serde_json::json!({
+            "version": "99.0.0",
+            "platforms": { name: { "signature": "x", "url": "https://example.com/Tingo.app.tar.gz" } },
+        });
+        let explicit = app.updater_builder().target("windows-x86_64").build().unwrap();
+        assert!(explicit.restore_update(platform("darwin-aarch64")).is_err_and(|e| missing_platform(&e)));
+        let detected = app.updater_builder().build().unwrap();
+        assert!(detected.restore_update(platform("linux-riscv64")).is_err_and(|e| missing_platform(&e)));
+        assert!(explicit.restore_update(platform("windows-x86_64")).unwrap().is_some());
+    }
+
+    /// Run with the actual signed Windows installer and the merged manifest from prepare-update.py.
+    #[test]
+    #[ignore = "requires TINGO_UPDATE_TEST_INSTALLER and TINGO_UPDATE_TEST_MANIFEST"]
+    fn signed_windows_installer_verifies_and_rejects_tampering() {
+        use std::path::PathBuf;
+        let installer = PathBuf::from(std::env::var("TINGO_UPDATE_TEST_INSTALLER").unwrap());
+        let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(std::env::var("TINGO_UPDATE_TEST_MANIFEST").unwrap()).unwrap()).unwrap();
+        let (app, config) = mock_app();
+        let updater = app.updater_builder()
+            .pubkey(config["plugins"]["updater"]["pubkey"].as_str().unwrap())
+            .target("windows-x86_64")
+            .version_comparator(|_, _| true) // the mock app's version is unrelated to the release
+            .build().unwrap();
+        let update = updater.restore_update(manifest.clone()).unwrap().unwrap();
+        let name = installer.file_name().unwrap().to_str().unwrap();
+        assert_eq!(update.download_url.path_segments().unwrap().next_back(), Some(name));
+        assert!(update.download_url.as_str().contains(&format!("/download/v{}/", manifest["version"].as_str().unwrap())));
+        let bytes = std::fs::read(&installer).unwrap();
+        assert_eq!(&bytes[..2], b"MZ");
+        update.verify(&bytes).unwrap();
+        let mut damaged = bytes.clone();
+        damaged[bytes.len() / 2] ^= 1;
+        assert!(update.verify(&damaged).is_err());
+        let mut wrong_version = manifest;
+        wrong_version["version"] = serde_json::json!("99.0.0");
+        assert!(updater.restore_update(wrong_version).unwrap().unwrap().verify(&bytes).is_err());
+    }
+
     /// Run with the actual signed release artifact; only a temporary fixture app is replaced.
     #[test]
     #[ignore = "requires TINGO_UPDATE_TEST_ARCHIVE and TINGO_UPDATE_TEST_MANIFEST"]
@@ -157,12 +221,7 @@ mod tests {
         use std::path::PathBuf;
         let archive = PathBuf::from(std::env::var("TINGO_UPDATE_TEST_ARCHIVE").unwrap());
         let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(std::env::var("TINGO_UPDATE_TEST_MANIFEST").unwrap()).unwrap()).unwrap();
-        let config: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
-        let mut context = tauri::test::mock_context(tauri::test::noop_assets());
-        context.config_mut().plugins.0.insert("updater".into(), config["plugins"]["updater"].clone());
-        let app = tauri::test::mock_builder()
-            .plugin(tauri_plugin_updater::Builder::new().build())
-            .build(context).unwrap();
+        let (app, config) = mock_app();
         let fixture = std::env::temp_dir().join(format!("tingo-updater-test-{}", std::process::id()));
         assert!(!fixture.exists());
         let bundle = fixture.join("Tingo.app");

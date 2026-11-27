@@ -2535,7 +2535,7 @@ async fn get_update(State(s): State<Shared>, Query(query): Query<UpdateQuery>) -
     })
 }
 
-/// 下载新版安装包到「下载」文件夹，校验 sha256 后打开（自动挂载，在访达里显示）
+/// 下载新版安装包到「下载」文件夹，校验 sha256 后打开（macOS 挂载 dmg，Windows 运行安装程序）
 async fn download_update(State(s): State<Shared>) -> ApiResult<Json<Job>> {
     let s2 = s.clone();
     let r = tokio::task::spawn_blocking(move || latest_release(&s2, false))
@@ -2571,10 +2571,17 @@ async fn download_update(State(s): State<Shared>) -> ApiResult<Json<Job>> {
         }
         crate::platform::open(&dest);
         st.update(id, |j| {
-            j.notice = i18n::tr(
-                "新版已下载并校验，把 Tingo 拖进「应用程序」替换即可",
-                "Downloaded and verified — drag Tingo into Applications to replace the old version",
-            )
+            j.notice = if cfg!(windows) {
+                i18n::tr(
+                    "新版已下载并校验，按安装程序的提示完成更新",
+                    "Downloaded and verified — follow the installer to finish updating",
+                )
+            } else {
+                i18n::tr(
+                    "新版已下载并校验，把 Tingo 拖进「应用程序」替换即可",
+                    "Downloaded and verified — drag Tingo into Applications to replace the old version",
+                )
+            }
             .into()
         });
         Ok(())

@@ -34,7 +34,11 @@ After `npm run release:mac` and DMG notarization, run:
 python3 scripts/prepare-update.py --notes /path/to/release-notes.md
 ```
 
-This requires accepted Apple notarization. It staples the app, recreates `Tingo.app.tar.gz` from the stapled app, signs it with `--app-version`, and writes `latest.json` plus checksums. Upload the DMG, archive, `.sig`, `latest.json` and `checksums.txt` to the same version's **draft** GitHub release, then publish as latest. The app checks `https://github.com/tancheng33/tingo/releases/latest/download/latest.json`; do not mark a release latest before all assets are uploaded.
+This requires accepted Apple notarization. It staples the app, recreates `Tingo.app.tar.gz` from the stapled app, signs it with `--app-version`, and writes `latest.json` plus checksums.
+
+The same run signs the Windows installer and adds it to `latest.json` as `windows-x86_64`, so build it first with `pnpm release:windows` (same version), or pass the CI artifact with `--windows-installer /path/Tingo_<version>_x64-setup.exe`. The script stops if the installer is missing or named for another version; `--skip-windows` publishes a macOS-only release, which Windows apps treat as no update. The NSIS installer itself is the Windows update package; the app runs it in passive mode and it relaunches Tingo.
+
+Upload the DMG, archive, Windows installer, both `.sig` files, `latest.json` and `checksums.txt` to the same version's **draft** GitHub release, then publish as latest. The app checks `https://github.com/tancheng33/tingo/releases/latest/download/latest.json`; do not mark a release latest before all assets are uploaded.
 
 To validate a finalized artifact without touching the installed app:
 
@@ -44,4 +48,12 @@ TINGO_UPDATE_TEST_MANIFEST=/absolute/path/latest.json \
 cargo +1.95.0 test --manifest-path src-tauri/Cargo.toml --lib signed_archive_install_and_tamper_rejection -- --ignored
 ```
 
-The test rejects altered bytes and a mismatched version, installs into a temporary fixture, and checks both the resulting Apple signature and stapled ticket. A production update refuses to install while any engine task or directory switch is active. Updates to a protected Applications folder may require macOS administrator authorization; cancellations are reported and the app stays open.
+The test rejects altered bytes and a mismatched version, installs into a temporary fixture, and checks both the resulting Apple signature and stapled ticket.
+
+For the Windows entry (runs on macOS; it verifies but does not install):
+
+```sh
+TINGO_UPDATE_TEST_INSTALLER=/absolute/path/Tingo_<version>_x64-setup.exe \
+TINGO_UPDATE_TEST_MANIFEST=/absolute/path/latest.json \
+cargo +1.95.0 test --manifest-path src-tauri/Cargo.toml --lib signed_windows_installer_verifies_and_rejects_tampering -- --ignored
+``` A production update refuses to install while any engine task or directory switch is active. Updates to a protected Applications folder may require macOS administrator authorization; cancellations are reported and the app stays open.

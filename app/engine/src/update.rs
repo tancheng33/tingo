@@ -1,4 +1,5 @@
-//! 检查更新（只桌面版）：读 GitHub 上最新的 Release，找 .dmg 安装包和 checksums.txt 里的 sha256。
+//! 检查更新（只桌面版）：读 GitHub 上最新的 Release，找本平台的安装包（macOS 是 .dmg，Windows 是 NSIS
+//! 的 -setup.exe）和 checksums.txt 里的 sha256。桌面 App 走 Tauri 自带的签名更新，这里是浏览器入口的兜底。
 
 use std::cmp::Ordering;
 use std::io::Read;
@@ -97,19 +98,26 @@ pub fn checksum_for(text: &str, name: &str) -> Option<String> {
     })
 }
 
-/// 多个 .dmg 时优先选本机架构的
-fn pick_dmg(assets: &[Value]) -> Option<&Value> {
-    let dmgs: Vec<&Value> = assets
+const INSTALLER_SUFFIX: &str = if cfg!(windows) { "-setup.exe" } else { ".dmg" };
+
+/// 发布脚本给本平台安装包起的名字
+fn installer_name(version: &str, arch: &str) -> String {
+    format!("Tingo_{version}_{arch}{INSTALLER_SUFFIX}")
+}
+
+/// 本平台的安装包；有多个时优先选本机架构的
+fn pick_installer(assets: &[Value]) -> Option<&Value> {
+    let found: Vec<&Value> = assets
         .iter()
-        .filter(|a| a["name"].as_str().is_some_and(|n| n.to_ascii_lowercase().ends_with(".dmg")))
+        .filter(|a| a["name"].as_str().is_some_and(|n| n.to_ascii_lowercase().ends_with(INSTALLER_SUFFIX)))
         .collect();
     let arch: &[&str] = if std::env::consts::ARCH == "aarch64" { &["aarch64", "arm64"] } else { &["x86_64", "x64", "intel"] };
-    dmgs.iter()
+    found.iter()
         .find(|a| {
             let n = a["name"].as_str().unwrap_or("").to_ascii_lowercase();
             arch.iter().any(|k| n.contains(k))
         })
-        .or(dmgs.first())
+        .or(found.first())
         .copied()
 }
 
@@ -118,7 +126,7 @@ pub fn parse_release(v: &Value, checksums: Option<&str>) -> Option<Release> {
     let tag = v["tag_name"].as_str()?;
     let latest = tag.trim().trim_start_matches(['v', 'V']).to_string();
     let assets = v["assets"].as_array().cloned().unwrap_or_default();
-    let dmg = pick_dmg(&assets);
+    let dmg = pick_installer(&assets);
     let dmg_name = dmg.and_then(|a| a["name"].as_str()).unwrap_or("").to_string();
     Some(Release {
         latest,
@@ -195,7 +203,7 @@ fn release_from_manifest(v: &Value, sums: &str) -> Result<Release, String> {
         "x86_64" => "x64",
         _ => return Err("Unsupported update architecture".into()),
     };
-    let name = format!("Tingo_{version}_{arch}.dmg");
+    let name = installer_name(version, arch);
     let sha256 = checksum_for(sums, &name).ok_or("No verified installer for this architecture")?;
     Ok(Release {
         latest: version.into(),
@@ -236,7 +244,7 @@ mod tests {
             if url == LATEST_URL { return Err("403 Forbidden: rate limit".into()); }
             if url == MANIFEST_URL { return Ok(r#"{"version":"0.5.2","notes":"fixed"}"#.into()); }
             assert_eq!(url, format!("{RELEASE_BASE}/download/v0.5.2/checksums.txt"));
-            Ok(format!("{}  Tingo_0.5.2_{arch}.dmg", "a".repeat(64)))
+            Ok(format!("{}  {}", "a".repeat(64), installer_name("0.5.2", arch)))
         }).unwrap();
         assert_eq!(urls.len(), 3);
         assert_eq!(r.latest, "0.5.2");
@@ -271,9 +279,11 @@ mod tests {
 
     #[test]
     fn release_json_and_checksums() {
-        let sums = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789ABCDEF  Tingo_0.3.0_aarch64.dmg\nffff  other.dmg\n";
+        let name = installer_name("0.3.0", "aarch64");
+        let sums = format!("0123456789abcdef0123456789abcdef0123456789abcdef0123456789ABCDEF  {name}\nffff  other.dmg\n");
+        let sums = sums.as_str();
         assert_eq!(
-            checksum_for(sums, "Tingo_0.3.0_aarch64.dmg").as_deref(),
+            checksum_for(sums, &name).as_deref(),
             Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
         );
         assert_eq!(checksum_for(sums, "other.dmg"), None);
@@ -282,14 +292,16 @@ mod tests {
             "body": "x".repeat(5000),
             "assets": [
                 {"name": "checksums.txt", "browser_download_url": "https://e/checksums.txt", "size": 100},
-                {"name": "Tingo_0.3.0_aarch64.dmg", "browser_download_url": "https://e/a.dmg", "size": 12_400_000},
+                {"name": "Tingo_0.3.0_x64-setup.exe.sig", "browser_download_url": "https://e/a.sig", "size": 400},
+                {"name": "Tingo.app.tar.gz", "browser_download_url": "https://e/a.tar.gz", "size": 12_000_000},
+                {"name": name, "browser_download_url": "https://e/installer", "size": 12_400_000},
             ],
         });
         let r = parse_release(&v, Some(sums)).unwrap();
         let j = r.to_json("0.2.0");
         assert_eq!(j["latest"], "0.3.0");
         assert_eq!(j["newer"], true);
-        assert_eq!(j["dmg"], "https://e/a.dmg");
+        assert_eq!(j["dmg"], "https://e/installer");
         assert_eq!(j["size_mb"], 12);
         assert_eq!(j["notes"].as_str().unwrap().chars().count(), 3000);
         assert!(j["sha256"].as_str().unwrap().starts_with("0123"));
