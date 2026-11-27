@@ -56,4 +56,6 @@ For the Windows entry (runs on macOS; it verifies but does not install):
 TINGO_UPDATE_TEST_INSTALLER=/absolute/path/Tingo_<version>_x64-setup.exe \
 TINGO_UPDATE_TEST_MANIFEST=/absolute/path/latest.json \
 cargo +1.95.0 test --manifest-path src-tauri/Cargo.toml --lib signed_windows_installer_verifies_and_rejects_tampering -- --ignored
-``` A production update refuses to install while any engine task or directory switch is active. Updates to a protected Applications folder may require macOS administrator authorization; cancellations are reported and the app stays open.
+```
+
+A production update refuses to install while any engine task or directory switch is active. Updates to a protected Applications folder may require macOS administrator authorization; cancellations are reported and the app stays open.
