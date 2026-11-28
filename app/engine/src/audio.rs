@@ -450,6 +450,116 @@ pub fn agc(audio: &[f32]) -> Vec<f32> {
 /// 自动增益最多放大多少分贝：再大就会把纯底噪拉成"有人说话"
 pub const AGC_MAX_GAIN_DB: f32 = 24.0;
 
+/// 一段识别结果至少要比周围底噪响这么多分贝才算有人说话，见 [`NoiseFloor`]。
+/// 实测没人说话时（风扇、空调、远处的动静）识别出的"嗯""好的""是不是"只比底噪高 2.5～8 dB，
+/// 正常说话大多高 13～37 dB，离麦克风远的轻声说话也大多在 10 dB 以上。
+pub const MIN_SPEECH_SNR_DB: f32 = 9.0;
+/// 不到 [`SHORT_MS`]、比底噪响但几乎没有浊音（[`voiced_fraction`] 不到这个比例）的段是敲键盘、点鼠标、碰桌子这类声音，
+/// 除非响到 [`LOUD_SNR_DB`]。实测这类误识别都不到 1 秒，浊音比例 0～0.04；
+/// 更长的段不看浊音：远处有人说话时噪声盖住了音高，整句浊音也可能测成 0，挡掉就漏了真话。
+pub const MIN_VOICED: f32 = 0.05;
+pub const SHORT_MS: u64 = 1000;
+pub const LOUD_SNR_DB: f32 = 20.0;
+
+/// 底噪估计，用来挡掉"没人说话也识别出字"。
+///
+/// [`agc`] 为了不漏掉轻声说话，会把安静的片段放大最多 24 dB，没人说话时房间底噪也被拉到说话的音量，
+/// 静音检测就当成有人在说，识别模型照例吐出"嗯""好的""是的"这类最常见的字，每句声纹又不像任何人，
+/// 实时转写里就冒出一个个新的说话人。边录边转每段只有零点几到十几秒，整段都是底噪时增益直接拉满，比整段转写更容易出现。
+/// 这里在没放大的原始音频上每 0.1 秒记一次音量，某段话前后各 30 秒里第 10 百分位当底噪，
+/// 段内第 90 百分位比底噪响多少就是这段的信噪比；只看相对底噪的高低，不看绝对音量，离麦克风远、整体很轻的会照样保留。
+/// 系统声音"让路"时混进来的数字静音（全零）不算底噪。
+#[derive(Default)]
+pub struct NoiseFloor {
+    frames: Vec<f32>, // 从录音开头起每 0.1 秒的音量（dBFS）
+    carry: Vec<f32>,  // 不够一帧的尾巴
+}
+
+impl NoiseFloor {
+    const FRAME: usize = SR / 10;
+    const CONTEXT: usize = 300; // 前后各 30 秒
+    const MIN_CONTEXT: usize = 10; // 不到 1 秒的非静音数据时不判断
+    const DIGITAL_SILENCE_DB: f32 = -100.0;
+
+    /// 依次喂入从录音开头起的原始音频（没放大）
+    pub fn feed(&mut self, audio: &[f32]) {
+        self.carry.extend_from_slice(audio);
+        let whole = self.carry.len() / Self::FRAME * Self::FRAME;
+        self.frames.extend(self.carry[..whole].chunks(Self::FRAME).map(level_db));
+        self.carry.drain(..whole);
+    }
+
+    /// `[start_ms, end_ms)` 这段比周围底噪响多少分贝；数据不够、判断不了时 None。
+    pub fn snr(&self, start_ms: u64, end_ms: u64) -> Option<f32> {
+        let n = self.frames.len();
+        let a = (start_ms / 100) as usize;
+        let b = (end_ms.div_ceil(100) as usize).max(a + 1).min(n);
+        if a >= b {
+            return None;
+        }
+        let audible = |x: &&f32| **x > Self::DIGITAL_SILENCE_DB;
+        let mut seg: Vec<f32> = self.frames[a..b].iter().filter(audible).copied().collect();
+        let ctx = &self.frames[a.saturating_sub(Self::CONTEXT)..(b + Self::CONTEXT).min(n)];
+        let mut ctx: Vec<f32> = ctx.iter().filter(audible).copied().collect();
+        if seg.is_empty() || ctx.len() < Self::MIN_CONTEXT {
+            return None;
+        }
+        Some(percentile(&mut seg, 0.9) - percentile(&mut ctx, 0.1))
+    }
+
+    /// `[start_ms, end_ms)` 这段（原始音频 `audio`）像不像有人在说话；判断不了时算是
+    pub fn is_speech(&self, start_ms: u64, end_ms: u64, audio: &[f32]) -> bool {
+        match self.snr(start_ms, end_ms) {
+            None => true,
+            Some(snr) if snr < MIN_SPEECH_SNR_DB => false,
+            Some(snr) if snr < LOUD_SNR_DB && end_ms.saturating_sub(start_ms) <= SHORT_MS => voiced_fraction(audio) >= MIN_VOICED,
+            Some(_) => true,
+        }
+    }
+}
+
+/// 一段音频里有音高（浊音）的比例：40 毫秒一帧、每 20 毫秒一次，只看比段内最响处低不到 25 dB 的帧，
+/// 自相关在 70～400 Hz 的基音周期上超过 0.5 就算浊音。说话（连"嗯"这样的鼻音）都有浊音，
+/// 键盘、鼠标、碰撞这类声音是宽带的冲击，没有周期。
+pub fn voiced_fraction(audio: &[f32]) -> f32 {
+    const F: usize = SR / 25;
+    const HOP: usize = SR / 50;
+    const LAGS: std::ops::Range<usize> = SR / 400..SR / 70;
+    if audio.len() < F {
+        return 0.0;
+    }
+    let frames: Vec<&[f32]> = (0..=audio.len() - F).step_by(HOP).map(|i| &audio[i..i + F]).collect();
+    let db: Vec<f32> = frames.iter().map(|f| level_db(f)).collect();
+    let top = db.iter().copied().fold(f32::MIN, f32::max);
+    let (mut loud, mut voiced) = (0, 0);
+    for (f, d) in frames.iter().zip(&db) {
+        if *d <= top - 25.0 {
+            continue;
+        }
+        loud += 1;
+        let mean = f.iter().sum::<f32>() / F as f32;
+        let x: Vec<f32> = f.iter().map(|v| v - mean).collect();
+        let energy: f32 = x.iter().map(|v| v * v).sum();
+        if energy <= 0.0 {
+            continue;
+        }
+        let best = LAGS
+            .map(|k| x[..F - k].iter().zip(&x[k..]).map(|(a, b)| a * b).sum::<f32>())
+            .fold(f32::MIN, f32::max);
+        voiced += (best / energy > 0.5) as usize;
+    }
+    voiced as f32 / loud.max(1) as f32
+}
+
+fn level_db(x: &[f32]) -> f32 {
+    10.0 * (x.iter().map(|v| v * v).sum::<f32>() / x.len().max(1) as f32 + 1e-12).log10()
+}
+
+fn percentile(x: &mut [f32], p: f32) -> f32 {
+    let k = ((x.len() - 1) as f32 * p).round() as usize;
+    *x.select_nth_unstable_by(k, |a, b| a.total_cmp(b)).1
+}
+
 /// 边录边转时每段最短、最长秒数：说完一句（遇到停顿）就切，一直没停顿最多攒 12 秒
 pub const LIVE_MIN_CHUNK_S: f64 = 2.5;
 pub const LIVE_MAX_CHUNK_S: f64 = 12.0;
@@ -521,6 +631,56 @@ mod tests {
         assert_eq!(find_live_cut(&x, 2.5, 12.0), None);
         let long = tone(13.0, 0.3);
         assert!(find_live_cut(&long, 2.5, 12.0).unwrap() <= 12 * SR as usize);
+    }
+
+    #[test]
+    fn noise_floor_drops_noise_and_clicks_but_keeps_quiet_speech() {
+        // 底噪约 -57 dBFS 的房间
+        let mut seed = 1u32;
+        let mut noise = |secs: f32| -> Vec<f32> {
+            (0..(secs * SR as f32) as usize)
+                .map(|_| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 17;
+                    seed ^= seed << 5;
+                    (seed as f32 / u32::MAX as f32 - 0.5) * 0.005
+                })
+                .collect()
+        };
+        let mix = |a: Vec<f32>, b: Vec<f32>| a.iter().zip(b).map(|(x, y)| x + y).collect::<Vec<f32>>();
+        // 0～10 秒底噪；10～12 秒轻声说话（约 -43 dBFS）；12～20 秒底噪，其中 15 秒处 0.5 秒里敲三下键盘
+        let mut clicks = noise(0.5);
+        for at in [800, 3200, 6000] {
+            for v in &mut clicks[at..at + 32] {
+                *v += 0.05;
+            }
+        }
+        let audio = [noise(10.0), mix(tone(2.0, 0.01), noise(2.0)), noise(3.0), clicks, noise(4.5)].concat();
+        let mut nf = NoiseFloor::default();
+        for part in audio.chunks(4000) {
+            nf.feed(part);
+        }
+        let seg = |a: u64, b: u64| &audio[a as usize * SR / 1000..b as usize * SR / 1000];
+        assert!(nf.is_speech(10_000, 12_000, seg(10_000, 12_000)), "{:?}", nf.snr(10_000, 12_000));
+        assert!(!nf.is_speech(4_000, 6_000, seg(4_000, 6_000)), "{:?}", nf.snr(4_000, 6_000));
+        assert!(nf.snr(15_000, 15_500).unwrap() > MIN_SPEECH_SNR_DB);
+        assert!(!nf.is_speech(15_000, 15_500, seg(15_000, 15_500)));
+        // 还没有足够的数据时不判断，一律保留
+        assert!(NoiseFloor::default().is_speech(0, 500, &noise(0.5)));
+    }
+
+    #[test]
+    fn voicing_tells_a_voice_from_noise() {
+        let hum: Vec<f32> = (0..SR / 2).map(|i| 0.1 * (i as f32 * 2.0 * std::f32::consts::PI * 150.0 / SR as f32).sin()).collect();
+        assert!(voiced_fraction(&hum) > 0.9);
+        let mut seed = 7u32;
+        let hiss: Vec<f32> = (0..SR / 2)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                seed as f32 / u32::MAX as f32 - 0.5
+            })
+            .collect();
+        assert!(voiced_fraction(&hiss) < 0.05);
     }
 
     fn tone(secs: f32, amp: f32) -> Vec<f32> {
