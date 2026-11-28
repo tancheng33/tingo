@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use crate::asr::{Engine, Segment, SR};
 use sherpa_onnx::VoiceActivityDetector;
 use crate::audio::{
-    duck_mix_default, find_cut, find_live_cut, GrowingWav, LIVE_MAX_CHUNK_S, LIVE_MIN_CHUNK_S, MAX_CHUNK_S, MIN_CHUNK_S, SEARCH_S,
+    duck_mix_default, find_cut, find_live_cut, GrowingWav, NoiseFloor, LIVE_MAX_CHUNK_S, LIVE_MIN_CHUNK_S, MAX_CHUNK_S, MIN_CHUNK_S, SEARCH_S,
 };
 use crate::cluster::cluster;
 use crate::transcript::{Sentence, Transcript};
@@ -46,15 +46,29 @@ pub struct Chunker {
     live: bool,
     /// 已经切走的样本数（pending 第一个样本的绝对位置），和静音检测的位置对齐用
     drained: usize,
+    /// 挡掉没人说话时从底噪里识别出的字
+    noise: NoiseFloor,
 }
 
 impl Chunker {
     pub fn feed(&mut self, audio: &[f32]) {
         self.pending.extend_from_slice(audio);
+        self.noise.feed(audio);
     }
 
     pub fn processed_s(&self) -> f64 {
         self.pending_start
+    }
+
+    /// 去掉不像有人说话的段（见 [`NoiseFloor`]）：没人说话时自动增益把底噪、键盘声拉上来，识别出的"嗯""好的"之类。
+    /// `chunk` 是这几段所在的原始音频，从 `offset_ms` 开始。
+    fn drop_noise(&self, mut segs: Vec<Segment>, chunk: &[f32], offset_ms: u64) -> Vec<Segment> {
+        let at = |ms: u64| ((ms.saturating_sub(offset_ms) as usize) * SR / 1000).min(chunk.len());
+        segs.retain(|g| {
+            let audio = &chunk[at(g.start_ms)..at(g.end_ms).max(at(g.start_ms))];
+            self.noise.is_speech(g.start_ms, g.end_ms, audio)
+        });
+        segs
     }
 
     /// 从待处理音频里切出下一段；不够长或找不到合适的切点时返回 None。
@@ -100,7 +114,8 @@ impl Chunker {
     }
 
     pub fn transcribe(&mut self, engine: &Engine, chunk: &[f32], offset_s: f64) -> Result<Vec<Segment>, String> {
-        let segs = engine.transcribe(chunk, (offset_s * 1000.0).round() as u64)?;
+        let offset_ms = (offset_s * 1000.0).round() as u64;
+        let segs = self.drop_noise(engine.transcribe(chunk, offset_ms)?, chunk, offset_ms);
         self.segments.extend(segs.iter().cloned());
         Ok(segs)
     }
@@ -545,9 +560,10 @@ fn step(inner: &Mutex<LiveState>, engine: &Engine, last: bool) -> bool {
         return false;
     };
     // 识别时不持锁：界面取实时文字不用等
-    let segs = engine.transcribe(&chunk, (offset * 1000.0).round() as u64);
+    let offset_ms = (offset * 1000.0).round() as u64;
+    let segs = engine.transcribe(&chunk, offset_ms);
     let mut s = inner.lock().unwrap();
-    let segs = match segs { Ok(s) => s, Err(e) => { s.error = Some(e); return false; } };
+    let segs = match segs { Ok(g) => s.chunker.drop_noise(g, &chunk, offset_ms), Err(e) => { s.error = Some(e); return false; } };
     s.add_lines(&segs);
     s.chunker.segments.extend(segs);
     true
